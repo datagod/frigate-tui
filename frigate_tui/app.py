@@ -96,9 +96,9 @@ class MetricCard(Static):
 # ------------------------------------------------------------------
 
 class FrigateMonitor(App[None]):
-    """Advanced colorful Frigate NVR monitor — queues, cameras, events, health."""
+    """Advanced colorful Frigate TUI — queues, cameras, events, health."""
 
-    TITLE = "Frigate Monitor"
+    TITLE = "Frigate TUI"
     SUB_TITLE = f"v{__version__}"
 
     BINDINGS = [
