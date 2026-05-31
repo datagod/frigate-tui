@@ -1,0 +1,37 @@
+services:
+  frigate-tui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: frigate-tui
+    image: frigate-tui:latest
+
+    # === Network attachment for easy local use ===
+    # By default we attach to a container named "frigate".
+    # This makes the TUI talk to Frigate over localhost with zero extra config.
+    #
+    # If your Frigate container has a different name, change this or override with:
+    #   docker compose run --rm --network container:your-frigate-name frigate-tui
+    network_mode: "container:frigate"
+
+    # Critical for interactive TUIs
+    tty: true
+    stdin_open: true
+
+    environment:
+      # Because we're sharing the frigate container's network namespace,
+      # we talk to it via localhost.
+      - FRIGATE_TUI_URL=${FRIGATE_TUI_URL:-http://localhost:5000}
+      - FRIGATE_TUI_INTERVAL=${FRIGATE_TUI_INTERVAL:-1.0}
+      # Optional: NO_COLOR=1 to disable colors if needed
+      # - NO_COLOR=${NO_COLOR:-}
+
+    # Optional: mount a local config if you want to persist settings
+    # volumes:
+    #   - ./config.yaml:/app/config.yaml:ro
+
+    # Usage examples:
+    #   docker compose run --rm frigate-tui
+    #
+    # For demo mode (no Frigate needed):
+    #   DEMO=1 docker compose run --rm frigate-tui

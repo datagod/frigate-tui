@@ -1,0 +1,19 @@
+# Frigate TUI configuration example
+# Copy to config.yaml (next to this file) or place at ~/.config/frigate-tui/config.yaml
+
+frigate_url: "http://localhost:5000"   # or http://your-frigate-host:5000
+poll_interval: 1.0                     # seconds between /api/stats refreshes (events are a bit slower)
+max_events: 150                        # how many events to keep in the live table
+
+# Optional auth (only needed if your Frigate requires login and you are not on a trusted host)
+# auth:
+#   username: "admin"
+#   password: "your-password"
+
+theme: "dark"                          # reserved for future theme switching
+
+# Advanced (future)
+# mqtt:
+#   enabled: false
+#   host: "localhost"
+#   port: 1883
