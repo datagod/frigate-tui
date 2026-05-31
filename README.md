@@ -1,4 +1,4 @@
-# Frigate TUI
+# Frigate Monitor
 
 A colorful, advanced terminal user interface for monitoring your [Frigate](https://github.com/blakeblackshear/frigate) NVR in real time.
 
@@ -6,7 +6,7 @@ Watch camera FPS, detector queues / pressure, GPU usage, incoming events, and sy
 
 ![screenshot placeholder](https://via.placeholder.com/800x400/1a1a2e/00d4ff?text=Frigate+TUI+Screenshot)
 
-## Features (v0.1)
+## Features
 
 - Live updating dashboard (1s poll for stats)
 - **Queues & Health**: Derived detection pressure, skipped frames, inference speed — the signals that matter when the pipeline backs up
@@ -29,10 +29,10 @@ Watch camera FPS, detector queues / pressure, GPU usage, incoming events, and sy
 pip install -e ".[dev]"
 
 # Run with live reload + debug console (F2)
-textual run --dev frigate_tui.app:FrigateMonitor
+textual run --dev frigate_monitor.app:FrigateMonitor
 
 # Or the installed command
-frigate-tui
+frigate-monitor
 ```
 
 Override the URL:
@@ -50,7 +50,7 @@ The compose file is configured so that this is usually all you need:
 docker compose build
 
 # Run the TUI
-docker compose run --rm frigate-tui
+docker compose run --rm frigate-monitor
 ```
 
 The default `docker-compose.yml` uses `network_mode: "container:frigate"` and talks to Frigate on `localhost`. This works great if you have a container named `frigate` running on the same machine.
@@ -66,7 +66,7 @@ network_mode: "container:frigate"
 to the actual name of your container, or run with an override:
 
 ```bash
-docker compose run --rm --network container:your-frigate-container frigate-tui
+docker compose run --rm --network container:your-frigate-container frigate-monitor
 ```
 
 Once the TUI starts, look at the **right-hand Activity Log** for connection status and live activity.
@@ -75,20 +75,20 @@ Once the TUI starts, look at the **right-hand Activity Log** for connection stat
 
 ```bash
 # Easiest way
-DEMO=1 docker compose run --rm frigate-tui
+DEMO=1 docker compose run --rm frigate-monitor
 
 # Alternative (explicit flag)
-docker compose run --rm frigate-tui frigate-tui --demo
+docker compose run --rm frigate-monitor frigate-monitor --demo
 ```
 
 ### Passing other options
 
 ```bash
 # Force a specific Frigate URL
-FRIGATE_TUI_URL=http://192.168.1.100:5000 docker compose run --rm frigate-tui
+FRIGATE_TUI_URL=http://192.168.1.100:5000 docker compose run --rm frigate-monitor
 
 # Or pass flags directly
-docker compose run --rm frigate-tui frigate-tui -u http://192.168.1.100:5000
+docker compose run --rm frigate-monitor frigate-monitor -u http://192.168.1.100:5000
 ```
 
 ### Advanced / One-off usage
@@ -97,10 +97,10 @@ If you need to point at a different Frigate instance:
 
 ```bash
 # Different host
-FRIGATE_TUI_URL=http://192.168.1.50:5000 docker compose run --rm frigate-tui
+FRIGATE_TUI_URL=http://192.168.1.50:5000 docker compose run --rm frigate-monitor
 
 # Or run without compose
-docker build -t frigate-tui .
+docker build -t frigate-monitor .
 docker run -it --rm \
   --network container:frigate \
   -e FRIGATE_TUI_URL=http://localhost:5000 \

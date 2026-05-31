@@ -1,12 +1,12 @@
 [project]
-name = "frigate-tui"
+name = "frigate-monitor"
 version = "0.1.0"
-description = "Advanced colorful terminal UI for monitoring a Frigate NVR installation (queues, detections, events, camera health)"
+description = "Advanced colorful terminal UI for monitoring a Frigate NVR (queues, detections, events, camera health)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
-  {name = "Frigate TUI Contributors"}
+  {name = "Frigate Monitor Contributors"}
 ]
 keywords = ["frigate", "nvr", "tui", "terminal", "monitoring", "textual", "surveillance"]
 classifiers = [
@@ -45,18 +45,18 @@ dev = [
 ]
 
 [project.scripts]
-frigate-tui = "frigate_tui.cli:main"
+frigate-monitor = "frigate_monitor.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/datagod/frigate-tui"
-Repository = "https://github.com/datagod/frigate-tui"
+Homepage = "https://github.com/datagod/frigate-monitor"
+Repository = "https://github.com/datagod/frigate-monitor"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["frigate_tui"]
+packages = ["frigate_monitor"]
 
 [tool.ruff]
 line-length = 100
@@ -71,5 +71,5 @@ strict = true
 warn_unused_ignores = true
 
 [tool.textual]
-# Enables `textual run --dev frigate_tui.app:FrigateMonitor`
+# Enables `textual run --dev frigate_monitor.app:FrigateMonitor`
 # and the F2 debug console during development

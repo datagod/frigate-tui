@@ -3,8 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: frigate-tui
-    image: frigate-tui:latest
+    container_name: frigate-monitor
+    image: frigate-monitor:latest
 
     # === Network attachment for easy local use ===
     # By default we attach to a container named "frigate".
@@ -31,7 +31,7 @@ services:
     #   - ./config.yaml:/app/config.yaml:ro
 
     # Usage examples:
-    #   docker compose run --rm frigate-tui
+    #   docker compose run --rm frigate-monitor
     #
     # For demo mode (no Frigate needed):
-    #   DEMO=1 docker compose run --rm frigate-tui
+    #   DEMO=1 docker compose run --rm frigate-monitor
