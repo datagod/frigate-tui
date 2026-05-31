@@ -13,9 +13,9 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Header, Label, RichLog, Static, TabbedContent, TabPane
 
-from frigate_monitor import __version__
-from frigate_monitor.api import FrigateClient
-from frigate_monitor.models import (
+from frigate_tui import __version__
+from frigate_tui.api import FrigateClient
+from frigate_tui.models import (
     CameraStats,
     FrigateEvent,
     SystemHealth,

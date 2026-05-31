@@ -1,5 +1,5 @@
 # Frigate TUI - Advanced colorful terminal monitor for Frigate NVR
-# Designed to be run interactively: docker compose run --rm frigate-monitor
+# Designed to be run interactively: docker compose run --rm frigate-tui
 
 FROM python:3.12-slim
 
@@ -31,6 +31,6 @@ COPY config.example.yaml docker-compose.yml ./
 
 # Default to running the TUI.
 # The CLI automatically treats bare invocation as `frigate-tui run`,
-# so `docker compose run --rm frigate-monitor` (and `docker run ... frigate-monitor`)
+# so `docker compose run --rm frigate-tui` (and `docker run ... frigate-tui`)
 # launch the monitor directly. Pass --demo or other options as usual.
 CMD ["frigate-tui"]

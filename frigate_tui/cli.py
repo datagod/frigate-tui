@@ -11,7 +11,7 @@ import typer
 import yaml
 from dotenv import load_dotenv
 
-from frigate_monitor.app import FrigateMonitor
+from frigate_tui.app import FrigateMonitor
 
 app = typer.Typer(
     name="frigate-tui",
@@ -99,7 +99,7 @@ def run(
 @app.command()
 def version() -> None:
     """Show frigate-tui version."""
-    from frigate_monitor import __version__
+    from frigate_tui import __version__
 
     typer.echo(f"frigate-tui {__version__}")
 
