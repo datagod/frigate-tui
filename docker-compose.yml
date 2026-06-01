@@ -29,6 +29,8 @@ services:
     # Mount the config so MQTT + other settings are picked up automatically
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
 
     # Usage examples:
     #   docker compose run --rm frigate-tui

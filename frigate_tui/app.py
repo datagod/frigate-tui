@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from rich.text import Text
@@ -127,7 +127,7 @@ class FrigateMonitor(App[None]):
     #summary {
         height: 4;
         background: #161b26;
-        border: tall #2a3142;
+        border: tall #4a5263;
         padding: 0 2;
         margin-bottom: 1;
     }
@@ -148,14 +148,14 @@ class FrigateMonitor(App[None]):
         padding: 0 1;
         margin: 0 0 1 0;
         background: #161b26;
-        border: tall #2a3142;
+        border: tall #4a5263;
     }
 
     .camera-card {
         padding: 0 1;
         margin-bottom: 1;
         background: #161b26;
-        border: tall #2a3142;
+        border: tall #4a5263;
     }
 
     .camera-header {
@@ -196,14 +196,14 @@ class FrigateMonitor(App[None]):
     }
 
     #left-panel {
-        width: 70%;
-        min-width: 60;
+        width: 58%;
+        min-width: 70;
     }
 
     #log-panel {
-        width: 30%;
-        min-width: 35;
-        border-left: tall #2a3142;
+        width: 42%;
+        min-width: 50;
+        border-left: tall #4a5263;
         background: #0c0e14;
     }
 
@@ -277,7 +277,7 @@ class FrigateMonitor(App[None]):
         """Append a timestamped message to the right-hand activity log."""
         try:
             log = self.query_one("#activity-log", RichLog)
-            ts = datetime.now().strftime("%H:%M:%S")
+            ts = datetime.now().astimezone().strftime("%H:%M:%S")
 
             if level == "error":
                 style = "bold red"
@@ -369,9 +369,18 @@ class FrigateMonitor(App[None]):
 
         self._update_version_label()
 
-        # Seed events table columns
+        # Seed events table columns with keys so we can update cells later
         table = self.query_one("#events-table", DataTable)
-        table.add_columns("Time", "Camera", "Label / Person", "Speed", "Score", "Dur", "Clip", "Snap")
+        table.add_columns(
+            ("time", "Time"),
+            ("camera", "Camera"),
+            ("label", "Label / Person"),
+            ("speed", "Speed"),
+            ("score", "Score"),
+            ("dur", "Dur"),
+            ("clip", "Clip"),
+            ("snap", "Snap"),
+        )
 
         # Always poll stats (lightweight and useful)
         self.set_interval(self.poll_interval, self._refresh_stats)
@@ -801,14 +810,10 @@ class FrigateMonitor(App[None]):
     def _render_events_table(self, new_only: list[FrigateEvent] | None = None) -> None:
         try:
             table = self.query_one("#events-table", DataTable)
-            to_add = new_only or self.recent_events
+            to_process = new_only or self.recent_events
 
-            for ev in to_add:
-                # Skip duplicates (we may receive the same event again on refresh)
-                if ev.id in table.rows:
-                    continue
-
-                ts = datetime.fromtimestamp(ev.start_time).strftime("%H:%M:%S")
+            for ev in to_process:
+                ts = datetime.fromtimestamp(ev.start_time, tz=timezone.utc).astimezone().strftime("%H:%M:%S")
                 dur = f"{ev.duration_s:.1f}s" if ev.duration_s else "—"
                 clip = "📼" if ev.has_clip else ""
                 snap = "📷" if ev.has_snapshot else ""
@@ -818,45 +823,72 @@ class FrigateMonitor(App[None]):
 
                 speed_str = f"{ev.average_estimated_speed:.1f}" if ev.average_estimated_speed else "—"
 
-                table.add_row(
-                    ts,
-                    ev.camera,
-                    label_cell,
-                    speed_str,
-                    f"{ev.top_score:.2f}" if ev.top_score else "—",
-                    dur,
-                    clip,
-                    snap,
-                    key=ev.id,
-                )
+                if ev.id in table.rows:
+                    # Update existing row with latest data (e.g. sub_label arriving later via MQTT)
+                    row_key = ev.id
+                    table.update_cell(row_key, "label", label_cell)
+                    table.update_cell(row_key, "speed", speed_str)
+                    table.update_cell(row_key, "score", f"{ev.top_score:.2f}" if ev.top_score else "—")
+                    table.update_cell(row_key, "dur", dur)
+                    table.update_cell(row_key, "clip", clip)
+                    table.update_cell(row_key, "snap", snap)
+                else:
+                    # Add new event row at the top so newest are visible immediately
+                    table.add_row(
+                        ts,
+                        ev.camera,
+                        label_cell,
+                        speed_str,
+                        f"{ev.top_score:.2f}" if ev.top_score else "—",
+                        dur,
+                        clip,
+                        snap,
+                        key=ev.id,
+                    )
+                    # Move the newly added row to the top (position 0)
+                    if table.row_count > 1:
+                        # Get the current first row key (will be the previous newest)
+                        first_key = next(iter(table.rows.keys()))
+                        if first_key != ev.id:
+                            table.move_row(ev.id, before_key=first_key)
+
+                    # Move cursor to the newest event (now at top)
+                    table.move_cursor(row=0)
 
             # Trim old rows (DataTable keeps insertion order)
             while table.row_count > self.max_events:
-                # Remove the oldest row (first key in the rows dict)
                 oldest_key = next(iter(table.rows.keys()))
                 table.remove_row(oldest_key)
-        except Exception:
-            pass
+
+        except Exception as e:
+            if not getattr(self, "_events_render_error_logged", False):
+                self.add_log(f"Failed to render events table: {type(e).__name__}: {e}", "error")
+                self._events_render_error_logged = True
 
     def _render_health(self) -> None:
         if not self.health:
             return
         try:
             pane = self.query_one("#health-pane", Vertical)
-            pane.remove_children()
 
             h = self.health
             color = h.status_color
 
-            pane.mount(Static(f"[bold {color}]DETECTION PRESSURE[/]\n"
-                              f"Expected: {h.expected_fps:.1f} fps   "
-                              f"Actual: {h.detection_fps:.1f}   "
-                              f"Backlog: {h.detection_pressure:.1f} ({h.pressure_pct*100:.0f}%)",
-                              classes=f"metric-value {color}"))
+            pressure_text = f"[bold {color}]DETECTION PRESSURE[/]\nExpected: {h.expected_fps:.1f} fps   Actual: {h.detection_fps:.1f}   Backlog: {h.detection_pressure:.1f} ({h.pressure_pct*100:.0f}%)"
+            skipped_text = f"\nSkipped frames / sec: [bold {color}]{h.skipped_fps}[/]\nPipeline healthy: [{'green' if h.is_healthy else 'red'}]{h.is_healthy}[/]"
 
-            pane.mount(Static(f"\nSkipped frames / sec: [bold {color}]{h.skipped_fps}[/]\n"
-                              f"Pipeline healthy: [{'green' if h.is_healthy else 'red'}]{h.is_healthy}[/]",
-                              classes="metric-value"))
+            # Create the two statics only on first render
+            if not pane.query("#health-pressure"):
+                pressure = Static(pressure_text, classes=f"metric-value {color}", id="health-pressure")
+                skipped = Static(skipped_text, classes="metric-value", id="health-skipped")
+                pane.mount(pressure)
+                pane.mount(skipped)
+            else:
+                # Update in place — no flicker
+                pane.query_one("#health-pressure", Static).update(pressure_text)
+                pane.query_one("#health-pressure", Static).classes = f"metric-value {color}"
+                pane.query_one("#health-skipped", Static).update(skipped_text)
+
         except Exception as e:
             self.add_log(f"Failed to render health tab: {type(e).__name__}: {e}", "error")
 
@@ -934,6 +966,10 @@ class FrigateMonitor(App[None]):
             self._render_cameras()
         elif event.pane.id == "health":
             self._render_health()
+        elif event.pane.id == "events":
+            # Populate the Events table with everything we have so far
+            # (important when events arrived via MQTT while user was on another tab)
+            self._render_events_table()
 
 
 if __name__ == "__main__":
