@@ -236,6 +236,7 @@ class FrigateMonitor(App[None]):
         s = settings or {}
         self.frigate_url: str = s.get("frigate_url", "http://localhost:5000")
         self.poll_interval: float = float(s.get("poll_interval", 1.0))
+        self.stats_log_interval: float = float(s.get("stats_log_interval", 10.0))
         self.max_events: int = int(s.get("max_events", 150))
         self.demo = bool(s.get("demo", False))
 
@@ -457,7 +458,7 @@ class FrigateMonitor(App[None]):
         if ok:
             det = stats.get("detection_fps", 0) if stats else 0
             should_log = (
-                now - self._last_stats_log_time > 10.0 or  # throttle successful logs
+                now - self._last_stats_log_time > self.stats_log_interval or  # throttle successful logs
                 self._stats_had_error
             )
             if should_log:

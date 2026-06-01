@@ -78,6 +78,7 @@ def run(
 
     final_url = url or yaml_cfg.get("frigate_url") or os.getenv("FRIGATE_TUI_URL") or "http://localhost:5000"
     final_interval = interval or yaml_cfg.get("poll_interval") or 1.0
+    stats_log_interval = yaml_cfg.get("stats_log_interval", 10.0)
     max_events = yaml_cfg.get("max_events", 150)
 
     # Support common truthy values for FRIGATE_TUI_DEMO env var
@@ -89,6 +90,7 @@ def run(
     settings = {
         "frigate_url": str(final_url).rstrip("/"),
         "poll_interval": float(final_interval),
+        "stats_log_interval": float(stats_log_interval),
         "max_events": int(max_events),
         "demo": demo,
         "mqtt": yaml_cfg.get("mqtt"),  # Optional MQTT configuration for real-time events
