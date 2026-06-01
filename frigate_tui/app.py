@@ -380,6 +380,11 @@ class FrigateMonitor(App[None]):
         if self.mqtt_config and not MQTT_AVAILABLE:
             self.add_log("MQTT configured but aiomqtt not installed — falling back to polling", "warning")
 
+        # Always do an initial load of recent historical events on startup
+        # This ensures the Events tab is not empty when the TUI first launches.
+        if not self.demo:
+            await self._load_initial_events()
+
         if self._use_mqtt_for_events and self.mqtt_config:
             self._mqtt_task = asyncio.create_task(self._run_mqtt_listener())
             self.add_log("MQTT event subscription enabled", "info")
@@ -522,6 +527,53 @@ class FrigateMonitor(App[None]):
                     self.add_log(f"+{len(new_events)-3} more events", "info")
         except Exception as e:
             self.add_log(f"Events poll error: {e}", "warning")
+
+    async def _load_initial_events(self) -> None:
+        """Load a batch of recent historical events on startup so the Events tab isn't empty."""
+        if self.demo or not self._client:
+            return
+        try:
+            # Load a larger initial batch for good history on startup
+            events_raw = await self._client.get_events(limit=80)
+            if not events_raw:
+                self.add_log("No historical events found on startup", "info")
+                return
+
+            loaded_events: list[FrigateEvent] = []
+            latest_ts = self._last_event_ts or 0
+
+            for e in events_raw:
+                try:
+                    data = e.get("data", {}) or {}
+                    fe = FrigateEvent(
+                        id=str(e.get("id", "")),
+                        camera=str(e.get("camera", "unknown")),
+                        label=str(e.get("label", "object")),
+                        start_time=float(e.get("start_time", 0)),
+                        end_time=e.get("end_time"),
+                        top_score=e.get("top_score"),
+                        has_snapshot=bool(e.get("has_snapshot")),
+                        has_clip=bool(e.get("has_clip")),
+                        zones=e.get("zones") or [],
+                        sub_label=e.get("sub_label"),
+                        average_estimated_speed=data.get("average_estimated_speed"),
+                        velocity_angle=data.get("velocity_angle"),
+                        attributes=data.get("attributes") or [],
+                    )
+                    loaded_events.append(fe)
+                    if fe.start_time > latest_ts:
+                        latest_ts = fe.start_time
+                except Exception:
+                    continue
+
+            if loaded_events:
+                self.recent_events = sorted(loaded_events, key=lambda x: x.start_time, reverse=True)[:self.max_events]
+                self._last_event_ts = latest_ts
+                self._render_events_table(self.recent_events)
+                self.add_log(f"Loaded {len(self.recent_events)} historical events on startup", "info")
+
+        except Exception as e:
+            self.add_log(f"Failed to load initial historical events: {e}", "warning")
 
     async def _refresh_reviews(self) -> None:
         """Fetch recent review items and surface important ones (especially with sub_labels)."""
