@@ -91,6 +91,7 @@ def run(
         "poll_interval": float(final_interval),
         "max_events": int(max_events),
         "demo": demo,
+        "mqtt": yaml_cfg.get("mqtt"),  # Optional MQTT configuration for real-time events
     }
 
     FrigateMonitor(settings).run()

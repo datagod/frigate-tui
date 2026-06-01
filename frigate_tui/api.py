@@ -59,3 +59,18 @@ class FrigateClient:
 
     async def get_config(self) -> dict[str, Any]:
         return await self._get("/api/config")
+
+    async def get_review_items(self, *, limit: int = 30, has_been_reviewed: bool | None = None) -> list[dict[str, Any]]:
+        """Fetch review items. These are higher-level 'things that need attention'."""
+        params: dict[str, Any] = {"limit": limit}
+        if has_been_reviewed is not None:
+            params["has_been_reviewed"] = has_been_reviewed
+        data = await self._get("/api/review", **params)
+        return data if isinstance(data, list) else []
+
+    async def get_event(self, event_id: str) -> dict[str, Any] | None:
+        """Fetch details for a single event."""
+        try:
+            return await self._get(f"/api/events/{event_id}")
+        except Exception:
+            return None

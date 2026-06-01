@@ -26,9 +26,9 @@ services:
       # Optional: NO_COLOR=1 to disable colors if needed
       # - NO_COLOR=${NO_COLOR:-}
 
-    # Optional: mount a local config if you want to persist settings
-    # volumes:
-    #   - ./config.yaml:/app/config.yaml:ro
+    # Mount the config so MQTT + other settings are picked up automatically
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
 
     # Usage examples:
     #   docker compose run --rm frigate-tui

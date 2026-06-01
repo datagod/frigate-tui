@@ -18,11 +18,18 @@ from frigate_tui.api import FrigateClient
 from frigate_tui.models import (
     CameraStats,
     FrigateEvent,
+    ReviewItem,
     SystemHealth,
     compute_health,
     label_color,
     parse_cameras,
 )
+try:
+    from frigate_tui.mqtt import FrigateMqttClient
+    MQTT_AVAILABLE = True
+except ImportError:
+    FrigateMqttClient = None  # type: ignore
+    MQTT_AVAILABLE = False
 
 
 # ------------------------------------------------------------------
@@ -61,10 +68,10 @@ class ConnectionStatus(Static):
 class FPSBar(Static):
     """Colorful unicode bar + numeric value for any FPS-style metric."""
 
-    def update_value(self, label: str, value: float, max_val: float = 10.0, color: str | None = None) -> None:
+    def update_value(self, label: str, value: float, max_val: float = 10.0, width: int = 15, color: str | None = None) -> None:
         pct = min(1.0, max(0.0, value / max_val)) if max_val > 0 else 0
-        filled = int(pct * 8)
-        bar = "█" * filled + "░" * (8 - filled)
+        filled = int(pct * width)
+        bar = "█" * filled + "░" * (width - filled)
 
         if color is None:
             if value < 0.3:
@@ -75,7 +82,7 @@ class FPSBar(Static):
                 color = "green"
 
         txt = Text()
-        txt.append(f"{label:<11}", style="dim")
+        txt.append(f"{label:<12}", style="dim")
         txt.append(bar + " ", style=color)
         txt.append(f"{value:5.1f}", style=f"bold {color}")
         self.update(txt)
@@ -144,6 +151,34 @@ class FrigateMonitor(App[None]):
         border: tall #2a3142;
     }
 
+    .camera-card {
+        padding: 0 1;
+        margin-bottom: 1;
+        background: #161b26;
+        border: tall #2a3142;
+    }
+
+    .camera-header {
+        margin-bottom: 0;
+    }
+
+    .camera-name {
+        text-style: bold;
+    }
+
+    .health-summary {
+        text-style: bold;
+    }
+
+    .status {
+        text-style: bold;
+    }
+
+    .legend {
+        margin-bottom: 1;
+        color: #6b7280;
+    }
+
     DataTable {
         background: #0f1117;
     }
@@ -204,10 +239,27 @@ class FrigateMonitor(App[None]):
         self.max_events: int = int(s.get("max_events", 150))
         self.demo = bool(s.get("demo", False))
 
+        # MQTT configuration (optional)
+        self.mqtt_config: dict[str, Any] | None = s.get("mqtt")
+        self._use_mqtt_for_events = bool(self.mqtt_config) and MQTT_AVAILABLE
+
         self._client: FrigateClient | None = None
         self._frigate_version: str = "?"
         self._last_event_ts: float | None = None
+        self._last_review_ts: float | None = None
         self._logged_connected: bool = False
+        self._mqtt_client: FrigateMqttClient | None = None
+        self._mqtt_task: asyncio.Task | None = None
+
+        # Stats logging throttling
+        self._last_stats_log_time: float = 0.0
+        self._stats_had_error: bool = False
+
+        # Diagnostic logging - only log camera parsing once
+        self._cameras_logged: bool = False
+
+        # Track camera cards for efficient updates (no flicker on refresh)
+        self._camera_cards: dict[str, Vertical] = {}
 
     def _format_connection_error(self, e: Exception) -> str:
         """Turn raw socket/DNS errors into clearer messages for the Activity Log."""
@@ -318,17 +370,27 @@ class FrigateMonitor(App[None]):
 
         # Seed events table columns
         table = self.query_one("#events-table", DataTable)
-        table.add_columns("Time", "Camera", "Label", "Score", "Dur", "Clip", "Snap")
+        table.add_columns("Time", "Camera", "Label / Person", "Speed", "Score", "Dur", "Clip", "Snap")
 
-        # Start live polling
+        # Always poll stats (lightweight and useful)
         self.set_interval(self.poll_interval, self._refresh_stats)
-        self.set_interval(max(2.0, self.poll_interval * 2), self._refresh_events)
 
-        self.add_log("Polling started", "info")
+        # Events: prefer MQTT subscription if configured, otherwise fall back to polling
+        if self.mqtt_config and not MQTT_AVAILABLE:
+            self.add_log("MQTT configured but aiomqtt not installed — falling back to polling", "warning")
 
-        # Prime the pump
+        if self._use_mqtt_for_events and self.mqtt_config:
+            self._mqtt_task = asyncio.create_task(self._run_mqtt_listener())
+            self.add_log("MQTT event subscription enabled", "info")
+        else:
+            self.set_interval(max(2.0, self.poll_interval * 2), self._refresh_events)
+            self.add_log("Event polling started (MQTT not configured). Stats logged every ~10s.", "info")
+
+        # Fetch recent Review items (higher signal than raw events, especially with sub_labels)
+        self.set_interval(8.0, self._refresh_reviews)
+
+        # Prime the pump for stats
         await self._refresh_stats()
-        await self._refresh_events()
 
     def _update_version_label(self) -> None:
         try:
@@ -368,19 +430,50 @@ class FrigateMonitor(App[None]):
             self.cameras = parse_cameras(stats)
             self.health = compute_health(stats)
 
+            if not self._cameras_logged:
+                if self.cameras:
+                    self.add_log(f"Parsed {len(self.cameras)} cameras from stats: {[c.name for c in self.cameras]}", "info")
+                else:
+                    self.add_log("Stats received but no cameras found in response", "warning")
+                self._cameras_logged = True
+
         self._render_summary(stats)
-        self._render_cameras()
         self._render_health()
         self._update_connection()
 
+        # Try to render Cameras and Health content as soon as data is available.
+        # This helps populate the tabs even before the user switches to them
+        # (combined with the tab activation handler).
+        self.call_after_refresh(self._render_cameras)
+        self.call_after_refresh(self._render_health)
+
+
+
         # Log to the right-hand activity window
+        # Always log errors immediately.
+        # Only log successful stats periodically (every 10s) or on recovery from error.
+        now = asyncio.get_event_loop().time()
+
         if ok:
             det = stats.get("detection_fps", 0) if stats else 0
-            self.add_log(f"Stats OK ({latency}ms) — detection {det:.1f} fps", "success")
+            should_log = (
+                now - self._last_stats_log_time > 10.0 or  # throttle successful logs
+                self._stats_had_error
+            )
+            if should_log:
+                self.add_log(f"Stats OK ({latency}ms) — detection {det:.1f} fps", "success")
+                self._last_stats_log_time = now
+                self._stats_had_error = False
         else:
             self.add_log(f"Stats poll failed: {err}", "error")
+            self._stats_had_error = True
+            self._last_stats_log_time = now  # ensure next success is logged promptly
 
     async def _refresh_events(self) -> None:
+        if self._use_mqtt_for_events:
+            # We're getting events via MQTT instead
+            return
+
         if self.demo:
             # In demo we just keep the last synthetic events if any
             return
@@ -393,6 +486,7 @@ class FrigateMonitor(App[None]):
             new_events: list[FrigateEvent] = []
             for e in events_raw:
                 try:
+                    data = e.get("data", {}) or {}
                     fe = FrigateEvent(
                         id=str(e.get("id", "")),
                         camera=str(e.get("camera", "unknown")),
@@ -403,6 +497,10 @@ class FrigateMonitor(App[None]):
                         has_snapshot=bool(e.get("has_snapshot")),
                         has_clip=bool(e.get("has_clip")),
                         zones=e.get("zones") or [],
+                        sub_label=e.get("sub_label"),
+                        average_estimated_speed=data.get("average_estimated_speed"),
+                        velocity_angle=data.get("velocity_angle"),
+                        attributes=data.get("attributes") or [],
                     )
                     new_events.append(fe)
                     if fe.start_time > (self._last_event_ts or 0):
@@ -417,11 +515,125 @@ class FrigateMonitor(App[None]):
                 self._render_events_table(new_events)  # only append the new ones for efficiency
 
                 for ev in new_events[:3]:  # log up to 3 new ones
-                    self.add_log(f"New event: {ev.label} on {ev.camera}", "success")
+                    label = ev.display_label
+                    self.add_log(f"New event: {label} on {ev.camera}", "success")
                 if len(new_events) > 3:
                     self.add_log(f"+{len(new_events)-3} more events", "info")
         except Exception as e:
             self.add_log(f"Events poll error: {e}", "warning")
+
+    async def _refresh_reviews(self) -> None:
+        """Fetch recent review items and surface important ones (especially with sub_labels)."""
+        if self.demo or not self._client:
+            return
+        try:
+            reviews_raw = await self._client.get_review_items(limit=15, has_been_reviewed=False)
+            if not reviews_raw:
+                return
+
+            new_important = []
+            for r in reviews_raw:
+                try:
+                    start = float(r.get("start_time", 0))
+                    if self._last_review_ts and start <= self._last_review_ts:
+                        continue
+
+                    data = r.get("data", {}) or {}
+                    review = ReviewItem(
+                        id=str(r.get("id", "")),
+                        camera=str(r.get("camera", "unknown")),
+                        start_time=start,
+                        end_time=r.get("end_time"),
+                        severity=r.get("severity", "detection"),
+                        has_been_reviewed=bool(r.get("has_been_reviewed")),
+                        objects=data.get("objects") or [],
+                        sub_labels=data.get("sub_labels") or [],
+                        zones=data.get("zones") or [],
+                    )
+
+                    # Only surface high-value reviews (alerts with people or sub_labels)
+                    if review.severity == "alert" or review.sub_labels:
+                        new_important.append(review)
+
+                    if start > (self._last_review_ts or 0):
+                        self._last_review_ts = start
+                except Exception:
+                    continue
+
+            for rev in new_important[:5]:
+                msg = f"Review: {rev.severity.upper()} on {rev.camera}"
+                if rev.sub_labels:
+                    msg += f" — {', '.join(rev.sub_labels)}"
+                elif rev.objects:
+                    msg += f" — {', '.join(rev.objects)}"
+                self.add_log(msg, "warning" if rev.severity == "alert" else "info")
+
+        except Exception as e:
+            self.add_log(f"Review fetch error: {e}", "warning")
+
+    async def _run_mqtt_listener(self) -> None:
+        """Background task that subscribes to Frigate events via MQTT."""
+        if not self.mqtt_config:
+            return
+
+        mqtt_cfg = self.mqtt_config
+        host = mqtt_cfg.get("host", "localhost")
+        port = int(mqtt_cfg.get("port", 1883))
+        username = mqtt_cfg.get("username")
+        password = mqtt_cfg.get("password")
+        topic_prefix = mqtt_cfg.get("topic_prefix", "frigate")
+
+        self.add_log(f"Connecting to MQTT at {host}:{port}...", "info")
+
+        try:
+            self._mqtt_client = FrigateMqttClient(
+                host=host,
+                port=port,
+                username=username,
+                password=password,
+                topic_prefix=topic_prefix,
+            )
+
+            async with self._mqtt_client:
+                connected = await self._mqtt_client.wait_until_connected(timeout=8.0)
+                if connected:
+                    self.add_log("MQTT connected — receiving events in real time", "success")
+                else:
+                    self.add_log("MQTT connection timeout — falling back to polling?", "warning")
+
+                async for event in self._mqtt_client.events():
+                    if self.demo:
+                        continue
+
+                    # Convert MQTT event to our internal model
+                    raw = event.raw or {}
+                    data = raw.get("data") or raw.get("after", {}).get("data") or {}
+                    fe = FrigateEvent(
+                        id=raw.get("id", ""),
+                        camera=event.camera,
+                        label=event.label,
+                        start_time=event.start_time,
+                        end_time=event.end_time,
+                        top_score=event.top_score,
+                        has_snapshot=event.has_snapshot,
+                        has_clip=event.has_clip,
+                        zones=event.zones or [],
+                        sub_label=raw.get("sub_label") or event.raw.get("after", {}).get("sub_label") if raw else None,
+                        average_estimated_speed=data.get("average_estimated_speed"),
+                        velocity_angle=data.get("velocity_angle"),
+                        attributes=data.get("attributes") or [],
+                    )
+
+                    # Add to recent events (avoid massive duplicates)
+                    self.recent_events = [fe] + [e for e in self.recent_events if e.id != fe.id][: self.max_events - 1]
+                    self._render_events_table([fe])
+
+                    label = fe.display_label
+                    self.add_log(f"New event (MQTT): {label} on {fe.camera}", "success")
+
+        except Exception as e:
+            self.add_log(f"MQTT listener error: {e}", "error")
+            # Optionally fall back to polling here in the future
 
     # ------------------------------------------------------------------
     # Rendering
@@ -467,27 +679,71 @@ class FrigateMonitor(App[None]):
             return
         try:
             scroll = self.query_one("#cameras-scroll", VerticalScroll)
-            scroll.remove_children()
+
+            # Mount legend only once
+            if not any(getattr(c, "id", None) == "cameras-legend" for c in scroll.children):
+                legend = Static(
+                    "[dim]Legend:[/]  "
+                    "Camera Input = raw frames from camera   |   "
+                    "Processing = how fast Frigate ingests them   |   "
+                    "Detection = frames actually analyzed by AI\n"
+                    "Colors: [green]Green=Healthy[/]  [yellow]Yellow=Degraded[/]  [red]Red=Overloaded[/]  [dim]Gray=Disabled[/]",
+                    classes="legend",
+                    id="cameras-legend"
+                )
+                scroll.mount(legend, before=0)
+
+            current_names = set()
 
             for cam in self.cameras:
-                row = Horizontal(classes="camera-row")
-                row.mount(Label(f"[bold]{cam.name}[/]", classes="metric-label"))
+                current_names.add(cam.name)
 
-                # Three bars
-                for label, val, mx in [
-                    ("cam", cam.camera_fps, 8),
-                    ("proc", cam.process_fps, 8),
-                    ("det", cam.detection_fps, 8),
-                ]:
-                    bar = FPSBar()
-                    bar.update_value(label, val, mx, cam.health_color if label == "det" else None)
-                    row.mount(bar)
+                if cam.name in self._camera_cards:
+                    # Update existing card in place (no flicker)
+                    card = self._camera_cards[cam.name]
 
-                status = "ON" if cam.detection_enabled else "OFF"
-                row.mount(Label(f"[{cam.health_color}]{status}[/]", classes="metric-value"))
-                scroll.mount(row)
-        except Exception:
-            pass
+                    # Update header children
+                    header = card.children[0]  # first child is the header
+                    if isinstance(header, Horizontal) and len(header.children) >= 3:
+                        header.children[0].update(f"[bold]{cam.name}[/]")
+                        header.children[1].update(f"  [{cam.health_color}]{cam.health_summary}[/]")
+                        status = "ON" if cam.detection_enabled else "OFF"
+                        header.children[2].update(f"   [{cam.health_color}]{status}[/]")
+
+                    # Update the three bars (they are children 1,2,3)
+                    if len(card.children) >= 4:
+                        card.children[1].update_value("Camera Input", cam.camera_fps, 15, width=18)
+                        card.children[2].update_value("Processing", cam.process_fps, 15, width=18)
+                        card.children[3].update_value("Detection", cam.detection_fps, 15, width=18, color=cam.health_color)
+                else:
+                    # Create new card
+                    name_label = Label(f"[bold]{cam.name}[/]", classes="camera-name")
+                    health_label = Label(f"  [{cam.health_color}]{cam.health_summary}[/]", classes="health-summary")
+                    status = "ON" if cam.detection_enabled else "OFF"
+                    status_label = Label(f"   [{cam.health_color}]{status}[/]", classes="status")
+                    header = Horizontal(name_label, health_label, status_label, classes="camera-header")
+
+                    cam_bar = FPSBar()
+                    cam_bar.update_value("Camera Input", cam.camera_fps, 15, width=18)
+
+                    proc_bar = FPSBar()
+                    proc_bar.update_value("Processing", cam.process_fps, 15, width=18)
+
+                    det_bar = FPSBar()
+                    det_bar.update_value("Detection", cam.detection_fps, 15, width=18, color=cam.health_color)
+
+                    card = Vertical(header, cam_bar, proc_bar, det_bar, classes="camera-card")
+                    scroll.mount(card)
+                    self._camera_cards[cam.name] = card
+
+            # Remove cards for cameras that no longer exist
+            to_remove = [name for name in self._camera_cards if name not in current_names]
+            for name in to_remove:
+                card = self._camera_cards.pop(name)
+                card.remove()
+
+        except Exception as e:
+            self.add_log(f"Failed to render cameras tab: {type(e).__name__}: {e}", "error")
 
     def _render_events_table(self, new_only: list[FrigateEvent] | None = None) -> None:
         try:
@@ -504,12 +760,16 @@ class FrigateMonitor(App[None]):
                 clip = "📼" if ev.has_clip else ""
                 snap = "📷" if ev.has_snapshot else ""
 
-                label_cell = Text(ev.label, style=label_color(ev.label))
+                display_label = ev.display_label
+                label_cell = Text(display_label, style=label_color(ev.label))
+
+                speed_str = f"{ev.average_estimated_speed:.1f}" if ev.average_estimated_speed else "—"
 
                 table.add_row(
                     ts,
                     ev.camera,
                     label_cell,
+                    speed_str,
                     f"{ev.top_score:.2f}" if ev.top_score else "—",
                     dur,
                     clip,
@@ -544,8 +804,8 @@ class FrigateMonitor(App[None]):
             pane.mount(Static(f"\nSkipped frames / sec: [bold {color}]{h.skipped_fps}[/]\n"
                               f"Pipeline healthy: [{'green' if h.is_healthy else 'red'}]{h.is_healthy}[/]",
                               classes="metric-value"))
-        except Exception:
-            pass
+        except Exception as e:
+            self.add_log(f"Failed to render health tab: {type(e).__name__}: {e}", "error")
 
     def _update_connection(self) -> None:
         try:
@@ -575,6 +835,17 @@ class FrigateMonitor(App[None]):
     async def action_quit(self) -> None:
         if self._client:
             await self._client.aclose()
+
+        if self._mqtt_task and not self._mqtt_task.done():
+            self._mqtt_task.cancel()
+            try:
+                await self._mqtt_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._mqtt_client:
+            await self._mqtt_client.disconnect()
+
         self.exit()
 
     def action_refresh(self) -> None:
@@ -602,6 +873,14 @@ class FrigateMonitor(App[None]):
     def action_switch_tab(self, tab_id: str) -> None:
         tc = self.query_one(TabbedContent)
         tc.active = tab_id
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        """Re-render tab contents when activated (handles lazy TabPane mounting)."""
+        if event.pane.id == "cameras":
+            self.add_log("Cameras tab activated — attempting render", "info")
+            self._render_cameras()
+        elif event.pane.id == "health":
+            self._render_health()
 
 
 if __name__ == "__main__":

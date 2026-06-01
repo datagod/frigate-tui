@@ -12,8 +12,10 @@ max_events: 150                        # how many events to keep in the live tab
 
 theme: "dark"                          # reserved for future theme switching
 
-# Advanced (future)
-# mqtt:
-#   enabled: false
-#   host: "localhost"
-#   port: 1883
+# Real-time events via MQTT (recommended over polling)
+mqtt:
+  host: "mqtt"                 # When using the same Docker network as Frigate
+  port: 1883
+  username: ""
+  password: ""
+  topic_prefix: "frigate"

@@ -9,6 +9,7 @@ Watch camera FPS, detector queues / pressure, GPU usage, incoming events, and sy
 ## Features
 
 - Live updating dashboard (1s poll for stats)
+- **Real-time events via MQTT** (optional but recommended — no polling for new detections)
 - **Queues & Health**: Derived detection pressure, skipped frames, inference speed — the signals that matter when the pipeline backs up
 - Per-camera view with colorful unicode FPS bars (camera / process / detection)
 - Live events feed with object-type color coding (person, car, dog, cat…)
@@ -118,6 +119,22 @@ Priority (highest wins):
 4. Built-in defaults (`http://localhost:5000`, 1.0s interval)
 
 See `config.example.yaml` for the full schema.
+
+### Real-time Events via MQTT (Recommended)
+
+Instead of polling, you can subscribe to Frigate events over MQTT for near-instant updates.
+
+Add this to your config:
+
+```yaml
+mqtt:
+  host: "localhost"
+  port: 1883
+  username: ""
+  password: ""
+```
+
+When enabled, the Activity Log will say **"MQTT connected — receiving events in real time"**.
 
 ## Key Bindings
 

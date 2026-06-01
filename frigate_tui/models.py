@@ -25,6 +25,18 @@ class CameraStats:
             return "yellow"
         return "green"
 
+    @property
+    def health_summary(self) -> str:
+        if not self.detection_enabled:
+            return "Disabled"
+        if self.skipped_fps > 0.2:
+            return "Overloaded"
+        if self.detection_fps < self.camera_fps * 0.6:
+            return "Degraded"
+        if self.detection_fps < self.camera_fps * 0.85:
+            return "Slightly Behind"
+        return "Healthy"
+
 
 @dataclass
 class SystemHealth:
@@ -118,6 +130,10 @@ class FrigateEvent:
     has_snapshot: bool = False
     has_clip: bool = False
     zones: list[str] = field(default_factory=list)
+    sub_label: str | None = None
+    average_estimated_speed: float | None = None
+    velocity_angle: float | None = None
+    attributes: list[str] = field(default_factory=list)
 
     @property
     def duration_s(self) -> float:
@@ -128,3 +144,36 @@ class FrigateEvent:
     @property
     def color(self) -> str:
         return label_color(self.label)
+
+    @property
+    def display_label(self) -> str:
+        """Returns label with sub_label if available (e.g. 'person (Bill)')."""
+        if self.sub_label:
+            return f"{self.label} ({self.sub_label})"
+        return self.label
+
+
+@dataclass
+class ReviewItem:
+    """Normalized review item from /api/review."""
+    id: str
+    camera: str
+    start_time: float
+    end_time: float | None = None
+    severity: str = "detection"   # "alert", "detection", etc.
+    has_been_reviewed: bool = False
+    objects: list[str] = field(default_factory=list)
+    sub_labels: list[str] = field(default_factory=list)
+    zones: list[str] = field(default_factory=list)
+
+    @property
+    def duration_s(self) -> float:
+        if self.end_time:
+            return max(0.0, self.end_time - self.start_time)
+        return 0.0
+
+    @property
+    def display_objects(self) -> str:
+        if self.sub_labels:
+            return ", ".join(self.sub_labels)
+        return ", ".join(self.objects) if self.objects else "—"
