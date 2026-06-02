@@ -74,3 +74,13 @@ class FrigateClient:
             return await self._get(f"/api/events/{event_id}")
         except Exception:
             return None
+
+    async def get_timeline(self, *, limit: int = 30, after: float | None = None, source: str | None = None) -> list[dict[str, Any]]:
+        """Fetch recent timeline entries (fine-grained tracked object visible/gone etc.)."""
+        params: dict[str, Any] = {"limit": limit}
+        if after is not None:
+            params["after"] = after
+        if source:
+            params["source"] = source
+        data = await self._get("/api/timeline", **params)
+        return data if isinstance(data, list) else []

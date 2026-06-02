@@ -20,6 +20,7 @@ from frigate_tui.models import (
     FrigateEvent,
     ReviewItem,
     SystemHealth,
+    TimelineEntry,
     compute_health,
     label_color,
     parse_cameras,
@@ -248,9 +249,11 @@ class FrigateMonitor(App[None]):
         self._frigate_version: str = "?"
         self._last_event_ts: float | None = None
         self._last_review_ts: float | None = None
+        self._last_timeline_ts: float | None = None
         self._logged_connected: bool = False
         self._mqtt_client: FrigateMqttClient | None = None
         self._mqtt_task: asyncio.Task | None = None
+        self._event_polling_active: bool = False
 
         # Stats logging throttling
         self._last_stats_log_time: float = 0.0
@@ -393,16 +396,21 @@ class FrigateMonitor(App[None]):
         # This ensures the Events tab is not empty when the TUI first launches.
         if not self.demo:
             await self._load_initial_events()
+            await self._load_initial_timeline()
 
         if self._use_mqtt_for_events and self.mqtt_config:
             self._mqtt_task = asyncio.create_task(self._run_mqtt_listener())
             self.add_log("MQTT event subscription enabled", "info")
         else:
             self.set_interval(max(2.0, self.poll_interval * 2), self._refresh_events)
+            self._event_polling_active = True
             self.add_log("Event polling started (MQTT not configured). Stats logged every ~10s.", "info")
 
         # Fetch recent Review items (higher signal than raw events, especially with sub_labels)
         self.set_interval(8.0, self._refresh_reviews)
+
+        # Fetch timeline entries (granular object visible/gone/stationary with sub-labels etc.) for activity log
+        self.set_interval(5.0, self._refresh_timeline)
 
         # Prime the pump for stats
         await self._refresh_stats()
@@ -485,8 +493,8 @@ class FrigateMonitor(App[None]):
             self._last_stats_log_time = now  # ensure next success is logged promptly
 
     async def _refresh_events(self) -> None:
-        if self._use_mqtt_for_events:
-            # We're getting events via MQTT instead
+        if getattr(self, "_use_mqtt_for_events", False) and not getattr(self, "_event_polling_active", False):
+            # We're getting events via MQTT instead (unless we fell back to polling)
             return
 
         if self.demo:
@@ -524,9 +532,12 @@ class FrigateMonitor(App[None]):
                     continue
 
             if new_events:
-                # Prepend newest, keep only the most recent N
+                # Prepend newest, keep only the most recent N. Sort defensively so the list (and full re-renders) stay ordered by start recency.
                 combined = new_events + self.recent_events
-                self.recent_events = combined[: self.max_events]
+                self.recent_events = sorted(
+                    {e.id: e for e in combined}.values(),
+                    key=lambda x: x.start_time, reverse=True
+                )[: self.max_events]
                 self._render_events_table(new_events)  # only append the new ones for efficiency
 
                 for ev in new_events[:3]:  # log up to 3 new ones
@@ -584,6 +595,59 @@ class FrigateMonitor(App[None]):
         except Exception as e:
             self.add_log(f"Failed to load initial historical events: {e}", "warning")
 
+    async def _load_initial_timeline(self) -> None:
+        """Load a few recent timeline entries on startup to seed the Activity Log."""
+        if self.demo or not self._client:
+            return
+        try:
+            timeline_raw = await self._client.get_timeline(limit=15, source="tracked_object")
+            if not timeline_raw:
+                return
+
+            loaded: list[TimelineEntry] = []
+            latest_ts = self._last_timeline_ts or 0
+
+            for t in timeline_raw:
+                try:
+                    ts = float(t.get("timestamp", 0))
+                    data = t.get("data", {}) or {}
+                    sub = data.get("sub_label")
+                    if isinstance(sub, list) and sub:
+                        sub = sub[0]
+                    entry = TimelineEntry(
+                        timestamp=ts,
+                        camera=str(t.get("camera", "unknown")),
+                        class_type=str(t.get("class_type", "")),
+                        source=str(t.get("source", "")),
+                        source_id=str(t.get("source_id", "")),
+                        label=str(data.get("label", "")),
+                        sub_label=sub if isinstance(sub, str) else None,
+                        score=data.get("score"),
+                        zones=data.get("zones") or [],
+                        attribute=str(data.get("attribute", "")),
+                    )
+                    loaded.append(entry)
+                    if ts > latest_ts:
+                        latest_ts = ts
+                except Exception:
+                    continue
+
+            if loaded:
+                self._last_timeline_ts = latest_ts
+                # Surface recent interesting ones (those with sub_labels or high confidence)
+                all_interesting = [
+                    e for e in sorted(loaded, key=lambda x: x.timestamp, reverse=True)
+                    if e.class_type in ("visible", "gone", "stationary") and (e.sub_label or (e.score or 0) > 0.8)
+                ]
+                to_surface = all_interesting[:3]  # most recent 3
+                for entry in reversed(to_surface):
+                    self._log_timeline_entry(entry)
+                if to_surface:
+                    self.add_log(f"Loaded {len(to_surface)} recent timeline items on startup", "info")
+
+        except Exception as e:
+            self.add_log(f"Failed to load initial timeline: {e}", "warning")
+
     async def _refresh_reviews(self) -> None:
         """Fetch recent review items and surface important ones (especially with sub_labels)."""
         if self.demo or not self._client:
@@ -633,6 +697,61 @@ class FrigateMonitor(App[None]):
         except Exception as e:
             self.add_log(f"Review fetch error: {e}", "warning")
 
+    async def _refresh_timeline(self) -> None:
+        """Poll recent timeline entries and surface interesting ones to the Activity Log."""
+        if self.demo or not self._client:
+            return
+        try:
+            timeline_raw = await self._client.get_timeline(limit=20, after=self._last_timeline_ts, source="tracked_object")
+            if not timeline_raw:
+                return
+
+            for t in timeline_raw:
+                try:
+                    ts = float(t.get("timestamp", 0))
+                    if self._last_timeline_ts and ts <= self._last_timeline_ts:
+                        continue
+
+                    data = t.get("data", {}) or {}
+                    sub = data.get("sub_label")
+                    if isinstance(sub, list) and sub:
+                        sub = sub[0]
+                    entry = TimelineEntry(
+                        timestamp=ts,
+                        camera=str(t.get("camera", "unknown")),
+                        class_type=str(t.get("class_type", "")),
+                        source=str(t.get("source", "")),
+                        source_id=str(t.get("source_id", "")),
+                        label=str(data.get("label", "")),
+                        sub_label=sub if isinstance(sub, str) else None,
+                        score=data.get("score"),
+                        zones=data.get("zones") or [],
+                        attribute=str(data.get("attribute", "")),
+                    )
+
+                    if entry.class_type in ("visible", "gone", "stationary", "active"):
+                        if entry.sub_label or (entry.score or 0) > 0.85:
+                            self._log_timeline_entry(entry)
+
+                    if ts > (self._last_timeline_ts or 0):
+                        self._last_timeline_ts = ts
+                except Exception:
+                    continue
+
+        except Exception as e:
+            self.add_log(f"Timeline fetch error: {e}", "warning")
+
+    def _log_timeline_entry(self, entry: TimelineEntry) -> None:
+        """Format and log a single timeline entry to the Activity Log."""
+        sub = f" ({entry.sub_label})" if entry.sub_label else ""
+        score_str = f" ({entry.score:.0%})" if entry.score else ""
+        attr = f" [{entry.attribute}]" if entry.attribute else ""
+        zone = f" in {', '.join(entry.zones)}" if entry.zones else ""
+        msg = f"{entry.class_type.capitalize()}: {entry.label}{sub}{score_str}{attr}{zone} on {entry.camera}"
+        # visible is normal activity, gone is end of it, stationary might be warning-ish
+        level = "info" if entry.class_type == "visible" else ("warning" if entry.class_type == "stationary" else "dim")
+        self.add_log(msg, level)
+
     async def _run_mqtt_listener(self) -> None:
         """Background task that subscribes to Frigate events via MQTT."""
         if not self.mqtt_config:
@@ -667,35 +786,77 @@ class FrigateMonitor(App[None]):
                     if self.demo:
                         continue
 
-                    # Convert MQTT event to our internal model
-                    raw = event.raw or {}
-                    data = raw.get("data") or raw.get("after", {}).get("data") or {}
-                    fe = FrigateEvent(
-                        id=raw.get("id", ""),
-                        camera=event.camera,
-                        label=event.label,
-                        start_time=event.start_time,
-                        end_time=event.end_time,
-                        top_score=event.top_score,
-                        has_snapshot=event.has_snapshot,
-                        has_clip=event.has_clip,
-                        zones=event.zones or [],
-                        sub_label=raw.get("sub_label") or event.raw.get("after", {}).get("sub_label") if raw else None,
-                        average_estimated_speed=data.get("average_estimated_speed"),
-                        velocity_angle=data.get("velocity_angle"),
-                        attributes=data.get("attributes") or [],
-                    )
+                    try:
+                        # Convert MQTT event to our internal model
+                        raw = event.raw or {}
+                        # Safely handle "after"/"before" which may be null in payloads
+                        after = raw.get("after") or {}
+                        before = raw.get("before") or {}
+                        data = raw.get("data") or after.get("data") or before.get("data") or {}
+                        fe = FrigateEvent(
+                            id=event.id or after.get("id") or before.get("id") or raw.get("id", ""),
+                            camera=event.camera,
+                            label=event.label,
+                            start_time=event.start_time,
+                            end_time=event.end_time,
+                            top_score=event.top_score,
+                            has_snapshot=event.has_snapshot,
+                            has_clip=event.has_clip,
+                            zones=event.zones or [],
+                            sub_label=raw.get("sub_label") or after.get("sub_label") or before.get("sub_label"),
+                            average_estimated_speed=data.get("average_estimated_speed"),
+                            velocity_angle=data.get("velocity_angle"),
+                            attributes=data.get("attributes") or [],
+                        )
 
-                    # Add to recent events (avoid massive duplicates)
-                    self.recent_events = [fe] + [e for e in self.recent_events if e.id != fe.id][: self.max_events - 1]
-                    self._render_events_table([fe])
+                        if fe.start_time > (self._last_event_ts or 0):
+                            self._last_event_ts = fe.start_time
 
-                    label = fe.display_label
-                    self.add_log(f"New event (MQTT): {label} on {fe.camera}", "success")
+                        # Only insert new rows for truly new/recent starts or updates to ones we are already showing.
+                        # This prevents MQTT "update" messages for ancient historical events (which Frigate may emit)
+                        # from polluting the live "current" events feed with old items.
+                        is_tracked = any(e.id == fe.id for e in self.recent_events)
+                        if not is_tracked:
+                            current_min_start = min((e.start_time for e in self.recent_events), default=0)
+                            if event.type != "new" and fe.start_time < current_min_start:
+                                # Late update/end for an event older than our current window (not in initial 80 or trimmed); skip to keep feed current
+                                continue
+
+                        # Maintain recent_events: only reorder (to front) for new starts so table reflects start recency.
+                        # For updates to tracked, replace in-place so position (and thus table row) stays stable.
+                        if event.type == "new" or not is_tracked:
+                            self.recent_events = [fe] + [e for e in self.recent_events if e.id != fe.id][: self.max_events - 1]
+                        else:
+                            for i, e in enumerate(self.recent_events):
+                                if e.id == fe.id:
+                                    self.recent_events[i] = fe
+                                    break
+                            else:
+                                self.recent_events = [fe] + self.recent_events[: self.max_events - 1]
+
+                        # Keep the list canonically sorted newest-start-first (defensive; full re-renders on tab switch rely on this for "current" view)
+                        self.recent_events = sorted(
+                            {e.id: e for e in self.recent_events}.values(),
+                            key=lambda x: x.start_time, reverse=True
+                        )[: self.max_events]
+
+                        self._render_events_table([fe])
+
+                        label = fe.display_label
+                        if event.type == "new" or not is_tracked:
+                            self.add_log(f"New event (MQTT): {label} on {fe.camera}", "success")
+                        elif event.type == "end":
+                            self.add_log(f"Event ended (MQTT): {label} on {fe.camera}", "info")
+                    except Exception as e:
+                        self.add_log(f"MQTT event parse/render error: {e}", "warning")
+                        continue
 
         except Exception as e:
             self.add_log(f"MQTT listener error: {e}", "error")
-            # Optionally fall back to polling here in the future
+            if not getattr(self, "_event_polling_active", False):
+                self.set_interval(max(2.0, self.poll_interval * 2), self._refresh_events)
+                self._event_polling_active = True
+                self.add_log("MQTT failed — falling back to event polling", "warning")
 
     # ------------------------------------------------------------------
     # Rendering
@@ -812,28 +973,26 @@ class FrigateMonitor(App[None]):
             table = self.query_one("#events-table", DataTable)
             to_process = new_only or self.recent_events
 
-            for ev in to_process:
-                ts = datetime.fromtimestamp(ev.start_time, tz=timezone.utc).astimezone().strftime("%H:%M:%S")
-                dur = f"{ev.duration_s:.1f}s" if ev.duration_s else "—"
-                clip = "📼" if ev.has_clip else ""
-                snap = "📷" if ev.has_snapshot else ""
-
-                display_label = ev.display_label
-                label_cell = Text(display_label, style=label_color(ev.label))
-
-                speed_str = f"{ev.average_estimated_speed:.1f}" if ev.average_estimated_speed else "—"
-
-                if ev.id in table.rows:
-                    # Update existing row with latest data (e.g. sub_label arriving later via MQTT)
-                    row_key = ev.id
-                    table.update_cell(row_key, "label", label_cell)
-                    table.update_cell(row_key, "speed", speed_str)
-                    table.update_cell(row_key, "score", f"{ev.top_score:.2f}" if ev.top_score else "—")
-                    table.update_cell(row_key, "dur", dur)
-                    table.update_cell(row_key, "clip", clip)
-                    table.update_cell(row_key, "snap", snap)
-                else:
-                    # Add new event row at the top so newest are visible immediately
+            # To guarantee correct sort order by start_time (newest first at top) and avoid
+            # "late discovered" events (via MQTT update for ids not in initial load) appearing
+            # out of order at the "current top", we do a full rebuild from the authoritative
+            # sorted self.recent_events whenever we are adding any new IDs.
+            # Pure updates (existing IDs) just refresh cells in place (no order change, less work).
+            any_new_ids = new_only is None or any(ev.id not in table.rows for ev in to_process)
+            if any_new_ids:
+                # Full rebuild ensures table exactly matches current sorted recent_events.
+                # This fixes mixed sort order (e.g. 19:05 then 19:36 then 19:06) and
+                # "top records go missing" on tab return (previous visual had out-of-order
+                # inserts; rebuild uses the list which is kept sorted + capped).
+                table.clear()
+                for ev in self.recent_events:
+                    ts = datetime.fromtimestamp(ev.start_time, tz=timezone.utc).astimezone().strftime("%H:%M:%S")
+                    dur = f"{ev.duration_s:.1f}s" if ev.duration_s else "—"
+                    clip = "📼" if ev.has_clip else ""
+                    snap = "📷" if ev.has_snapshot else ""
+                    display_label = ev.display_label
+                    label_cell = Text(display_label, style=label_color(ev.label))
+                    speed_str = f"{ev.average_estimated_speed:.1f}" if ev.average_estimated_speed else "—"
                     table.add_row(
                         ts,
                         ev.camera,
@@ -845,19 +1004,32 @@ class FrigateMonitor(App[None]):
                         snap,
                         key=ev.id,
                     )
-                    # Move the newly added row to the top (position 0)
-                    if table.row_count > 1:
-                        # Get the current first row key (will be the previous newest)
-                        first_key = next(iter(table.rows.keys()))
-                        if first_key != ev.id:
-                            table.move_row(ev.id, before_key=first_key)
-
-                    # Move cursor to the newest event (now at top)
+                if self.recent_events:
                     table.move_cursor(row=0)
+            else:
+                # All items in to_process are updates to rows we already have: just refresh cells.
+                for ev in to_process:
+                    if ev.id in table.rows:
+                        ts = datetime.fromtimestamp(ev.start_time, tz=timezone.utc).astimezone().strftime("%H:%M:%S")
+                        dur = f"{ev.duration_s:.1f}s" if ev.duration_s else "—"
+                        clip = "📼" if ev.has_clip else ""
+                        snap = "📷" if ev.has_snapshot else ""
+                        display_label = ev.display_label
+                        label_cell = Text(display_label, style=label_color(ev.label))
+                        speed_str = f"{ev.average_estimated_speed:.1f}" if ev.average_estimated_speed else "—"
+                        row_key = ev.id
+                        table.update_cell(row_key, "label", label_cell)
+                        table.update_cell(row_key, "speed", speed_str)
+                        table.update_cell(row_key, "score", f"{ev.top_score:.2f}" if ev.top_score else "—")
+                        table.update_cell(row_key, "dur", dur)
+                        table.update_cell(row_key, "clip", clip)
+                        table.update_cell(row_key, "snap", snap)
 
-            # Trim old rows (DataTable keeps insertion order)
+            # Trim (defensive; full rebuilds from capped list shouldn't exceed, but live
+            # incremental adds can temporarily).
             while table.row_count > self.max_events:
-                oldest_key = next(iter(table.rows.keys()))
+                keys = list(table.rows.keys())
+                oldest_key = keys[-1]
                 table.remove_row(oldest_key)
 
         except Exception as e:
@@ -933,10 +1105,10 @@ class FrigateMonitor(App[None]):
 
         self.exit()
 
-    def action_refresh(self) -> None:
+    async def action_refresh(self) -> None:
         self.add_log("Manual refresh requested", "info")
-        self._refresh_stats()
-        self._refresh_events()
+        await self._refresh_stats()
+        await self._refresh_events()
 
     def action_clear_log(self) -> None:
         """Clear the right-hand activity log."""

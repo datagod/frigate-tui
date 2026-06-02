@@ -15,6 +15,7 @@ class FrigateMqttEvent:
     """Normalized event received over MQTT."""
 
     type: str  # "new", "update", or "end"
+    id: str
     camera: str
     label: str
     start_time: float
@@ -122,6 +123,7 @@ class FrigateMqttClient:
             if not event_data:
                 return None
 
+            event_id = event_data.get("id") or payload.get("id", "")
             camera = event_data.get("camera", "unknown")
             label = event_data.get("label", "object")
 
@@ -132,6 +134,7 @@ class FrigateMqttClient:
 
             return FrigateMqttEvent(
                 type=event_type,
+                id=str(event_id) if event_id else "",
                 camera=camera,
                 label=label,
                 start_time=start_time,

@@ -177,3 +177,19 @@ class ReviewItem:
         if self.sub_labels:
             return ", ".join(self.sub_labels)
         return ", ".join(self.objects) if self.objects else "—"
+
+
+@dataclass
+class TimelineEntry:
+    """Normalized timeline entry from /api/timeline (used for activity log)."""
+
+    timestamp: float
+    camera: str
+    class_type: str  # "visible", "gone", "stationary", "active", etc.
+    source: str = "tracked_object"
+    source_id: str = ""
+    label: str = ""
+    sub_label: str | None = None
+    score: float | None = None
+    zones: list[str] = field(default_factory=list)
+    attribute: str = ""
