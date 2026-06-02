@@ -22,9 +22,11 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY frigate_tui ./frigate_tui
 
-# Install the package (normal install is correct and faster for containers).
+# Allow optional extras (e.g. web) to be installed via build arg.
+# Usage in compose: build with args: { INSTALL_EXTRAS: "[web]" }
+ARG INSTALL_EXTRAS=""
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir .
+    pip install --no-cache-dir .${INSTALL_EXTRAS}
 
 # Copy the remaining supporting files (compose, example config, docs, etc.)
 COPY config.example.yaml docker-compose.yml ./
@@ -33,4 +35,11 @@ COPY config.example.yaml docker-compose.yml ./
 # The CLI automatically treats bare invocation as `frigate-tui run`,
 # so `docker compose run --rm frigate-tui` (and `docker run ... frigate-tui`)
 # launch the monitor directly. Pass --demo or other options as usual.
+#
+# For the web UI (feature parity, served on LAN):
+#   docker compose --profile web up --build frigate-web
+#   (the --build is needed the first time to install the [web] extras)
+#
+#   or for a one-off container:
+#   docker run -p 8080:8080 ... frigate-tui frigate-tui web --host 0.0.0.0 --port 8080
 CMD ["frigate-tui"]
