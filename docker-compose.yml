@@ -37,3 +37,65 @@ services:
     #
     # For demo mode (no Frigate needed):
     #   DEMO=1 docker compose run --rm frigate-tui
+
+  # ------------------------------------------------------------------
+  # Web dashboard (new on web-interface branch)
+  # Serves the exact same features over the local network in a browser.
+  # Uses the same core as the TUI so behavior, logs, and calculations match.
+  #
+  # Run with:
+  #   docker compose --profile web up --build frigate-web
+  #
+  # Then open http://<your-host-lan-ip>:8080 from another machine on your network.
+  #
+  # IMPORTANT:
+  # - The web service uses a build arg to install the optional [web] dependencies.
+  #   Use `--build` (or `docker compose --profile web build`) the first time.
+  # - We do not use `network_mode: container:frigate` because Docker forbids
+  #   combining it with port publishing. The web container has its own network,
+  #   so set FRIGATE_TUI_URL if needed so it can reach your Frigate instance.
+  # ------------------------------------------------------------------
+  frigate-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Install the optional web dependencies into the image for this service
+        INSTALL_EXTRAS: "[web]"
+    image: frigate-tui:latest
+    container_name: frigate-web
+    profiles: ["web"]
+
+    environment:
+      # Point this at an address the web container can reach Frigate on.
+      # Common choices:
+      #   - http://host.docker.internal:5000   (works on Docker Desktop + Linux with extra_hosts below)
+      #   - http://192.168.1.50:5000           (your actual Frigate LAN IP)
+      #   - http://localhost:5000              (only if Frigate is on the host and you're using host networking)
+      - FRIGATE_TUI_URL=${FRIGATE_TUI_URL:-http://host.docker.internal:5000}
+      - FRIGATE_TUI_INTERVAL=${FRIGATE_TUI_INTERVAL:-1.0}
+
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+
+    # Publish the web UI to the host so other machines on the LAN can reach it
+    ports:
+      - "${FRIGATE_WEB_PORT:-8080}:8080"
+
+    # Make host.docker.internal work reliably on Linux hosts
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # No TTY needed for the web server
+    command: >
+      frigate-tui web --host 0.0.0.0 --port 8080
+      ${FRIGATE_TUI_DEMO:+--demo}
+
+    # Example overrides:
+    #   FRIGATE_WEB_PORT=8765 docker compose --profile web up frigate-web
+    #   DEMO=1 docker compose --profile web up frigate-web
+    #   FRIGATE_TUI_URL=http://192.168.1.50:5000 docker compose --profile web up frigate-web
+    #   FRIGATE_TUI_URL=http://localhost:5000   docker compose --profile web up frigate-web
+

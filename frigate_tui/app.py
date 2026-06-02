@@ -14,17 +14,17 @@ from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Header, Label, RichLog, Static, TabbedContent, TabPane
 
 from frigate_tui import __version__
-from frigate_tui.api import FrigateClient
+from frigate_tui.core import FrigateMonitorCore
 from frigate_tui.models import (
     CameraStats,
     FrigateEvent,
-    ReviewItem,
     SystemHealth,
-    TimelineEntry,
     compute_health,
     label_color,
     parse_cameras,
 )
+# Note: api/mqtt/models are now primarily used via core for shared logic.
+# We keep a couple of direct imports only for type hints / edge cases if needed.
 try:
     from frigate_tui.mqtt import FrigateMqttClient
     MQTT_AVAILABLE = True
@@ -235,46 +235,20 @@ class FrigateMonitor(App[None]):
     def __init__(self, settings: dict[str, Any] | None = None) -> None:
         super().__init__()
         s = settings or {}
-        self.frigate_url: str = s.get("frigate_url", "http://localhost:5000")
-        self.poll_interval: float = float(s.get("poll_interval", 1.0))
-        self.stats_log_interval: float = float(s.get("stats_log_interval", 10.0))
-        self.max_events: int = int(s.get("max_events", 150))
-        self.demo = bool(s.get("demo", False))
 
-        # MQTT configuration (optional)
-        self.mqtt_config: dict[str, Any] | None = s.get("mqtt")
-        self._use_mqtt_for_events = bool(self.mqtt_config) and MQTT_AVAILABLE
+        # Core owns ALL the hard logic (fetch, MQTT, state, logs, merge rules, etc.)
+        self.core = FrigateMonitorCore(s)
 
-        self._client: FrigateClient | None = None
-        self._frigate_version: str = "?"
-        self._last_event_ts: float | None = None
-        self._last_review_ts: float | None = None
-        self._last_timeline_ts: float | None = None
-        self._logged_connected: bool = False
-        self._mqtt_client: FrigateMqttClient | None = None
-        self._mqtt_task: asyncio.Task | None = None
-        self._event_polling_active: bool = False
+        # Keep lightweight local aliases for the old reactive-driven code paths
+        self.frigate_url: str = self.core.frigate_url
+        self.demo = self.core.demo
+        self.max_events = self.core.max_events
 
-        # Stats logging throttling
-        self._last_stats_log_time: float = 0.0
-        self._stats_had_error: bool = False
-
-        # Diagnostic logging - only log camera parsing once
-        self._cameras_logged: bool = False
-
-        # Track camera cards for efficient updates (no flicker on refresh)
+        # Camera card cache is TUI-only (for flicker-free in-place updates)
         self._camera_cards: dict[str, Vertical] = {}
 
-    def _format_connection_error(self, e: Exception) -> str:
-        """Turn raw socket/DNS errors into clearer messages for the Activity Log."""
-        msg = str(e)
-        if "errno -2" in msg or "Name or service not known" in msg:
-            return f"DNS failure for '{self.frigate_url}' (errno -2). Wrong Docker network or hostname?"
-        if "Connection refused" in msg:
-            return "Connection refused — is Frigate running and listening on the port?"
-        if "timeout" in msg.lower():
-            return "Connection timed out"
-        return msg[:70]
+        # We still let the old methods read/write these reactives for minimal diff in renders.
+        # The listeners below will keep them in sync with core.
 
     def add_log(self, message: str, level: str = "info") -> None:
         """Append a timestamped message to the right-hand activity log."""
@@ -354,25 +328,11 @@ class FrigateMonitor(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
-        self._client = FrigateClient(self.frigate_url)
+        # Wire core listeners first so we receive logs/state immediately
+        self.core.add_update_listener(self._on_core_update)
 
-        self.add_log(f"Starting Frigate TUI v{__version__}", "info")
-        self.add_log(f"Target: {self.frigate_url}", "info")
-
-        # Show the target URL immediately in the status bar
+        # TUI-specific: show target early + create the events DataTable schema
         self._update_connection()
-
-        # One-time version fetch (important diagnostic)
-        try:
-            self._frigate_version = await self._client.get_version()
-            self.add_log(f"Connected to Frigate {self._frigate_version}", "success")
-        except Exception as e:
-            self._frigate_version = "unknown"
-            self.add_log(f"Failed to reach {self.frigate_url}/api/version: {self._format_connection_error(e)}", "error")
-
-        self._update_version_label()
-
-        # Seed events table columns with keys so we can update cells later
         table = self.query_one("#events-table", DataTable)
         table.add_columns(
             ("time", "Time"),
@@ -385,495 +345,85 @@ class FrigateMonitor(App[None]):
             ("snap", "Snap"),
         )
 
-        # Always poll stats (lightweight and useful)
-        self.set_interval(self.poll_interval, self._refresh_stats)
+        # Start the core (it does version probe, initial loads, all polling/MQTT, log emission)
+        await self.core.start()
 
-        # Events: prefer MQTT subscription if configured, otherwise fall back to polling
-        if self.mqtt_config and not MQTT_AVAILABLE:
-            self.add_log("MQTT configured but aiomqtt not installed — falling back to polling", "warning")
+        # Prime the on-screen version label from whatever the core discovered
+        self._update_version_label()
 
-        # Always do an initial load of recent historical events on startup
-        # This ensures the Events tab is not empty when the TUI first launches.
-        if not self.demo:
-            await self._load_initial_events()
-            await self._load_initial_timeline()
-
-        if self._use_mqtt_for_events and self.mqtt_config:
-            self._mqtt_task = asyncio.create_task(self._run_mqtt_listener())
-            self.add_log("MQTT event subscription enabled", "info")
-        else:
-            self.set_interval(max(2.0, self.poll_interval * 2), self._refresh_events)
-            self._event_polling_active = True
-            self.add_log("Event polling started (MQTT not configured). Stats logged every ~10s.", "info")
-
-        # Fetch recent Review items (higher signal than raw events, especially with sub_labels)
-        self.set_interval(8.0, self._refresh_reviews)
-
-        # Fetch timeline entries (granular object visible/gone/stationary with sub-labels etc.) for activity log
-        self.set_interval(5.0, self._refresh_timeline)
-
-        # Prime the pump for stats
-        await self._refresh_stats()
+        # Initial pump (core already did a stats refresh inside start, but ensure renders)
+        self.call_after_refresh(self._render_cameras)
+        self.call_after_refresh(self._render_health)
 
     def _update_version_label(self) -> None:
         try:
-            self.query_one("#frigate-version", Label).update(self._frigate_version)
+            ver = getattr(self.core, "_frigate_version", "?")
+            self.query_one("#frigate-version", Label).update(ver)
         except Exception:
             pass
 
     # ------------------------------------------------------------------
-    # Data refresh (stats + events)
+    # Core listener bridge (keeps old reactives + render methods working)
+    # ------------------------------------------------------------------
+
+    def _on_core_update(self, kind: str, payload: Any) -> None:
+        """Receive notifications from the shared core and drive the TUI.
+
+        This is the key integration point that lets us reuse 100% of the
+        update / MQTT / health / log logic while keeping the existing
+        Textual widgets and render methods.
+        """
+        try:
+            if kind == "stats":
+                self.last_stats = payload
+                self._render_summary(payload)
+                self._render_health()
+                self._update_connection()
+                self.call_after_refresh(self._render_cameras)
+                self.call_after_refresh(self._render_health)
+            elif kind == "cameras":
+                self.cameras = payload or []
+                self.call_after_refresh(self._render_cameras)
+            elif kind == "health":
+                self.health = payload
+                self._render_health()
+            elif kind == "events":
+                self.recent_events = payload or []
+                # Full authoritative list from core — rebuild for correct order (matches old behavior)
+                self._render_events_table()
+            elif kind == "log":
+                # Core already emitted the exact same message strings as the old TUI
+                if isinstance(payload, dict):
+                    self.add_log(payload.get("message", ""), payload.get("level", "info"))
+                else:
+                    self.add_log(str(payload))
+            elif kind == "connection":
+                if isinstance(payload, dict):
+                    self.connection_ok = payload.get("ok", True)
+                    self.latency_ms = payload.get("latency_ms")
+                    self.last_error = payload.get("last_error")
+                self._update_connection()
+            elif kind == "version":
+                self._update_version_label()
+        except Exception:
+            # Never let a listener break the TUI
+            pass
+
+    # ------------------------------------------------------------------
+    # Thin delegation wrappers (kept for any direct calls from actions / tabs)
+    # The real work now lives in core. These just forward.
     # ------------------------------------------------------------------
 
     async def _refresh_stats(self) -> None:
-        start = asyncio.get_event_loop().time()
-
-        try:
-            if self.demo:
-                stats = self._demo_stats()
-            else:
-                assert self._client
-                stats = await self._client.get_stats()
-
-            ok = True
-            err = None
-        except Exception as e:
-            stats = None
-            ok = False
-            err = self._format_connection_error(e)
-
-        latency = int((asyncio.get_event_loop().time() - start) * 1000)
-
-        self.last_stats = stats
-        self.connection_ok = ok
-        self.latency_ms = latency if ok else None
-        self.last_error = err
-
-        if stats:
-            self.cameras = parse_cameras(stats)
-            self.health = compute_health(stats)
-
-            if not self._cameras_logged:
-                if self.cameras:
-                    self.add_log(f"Parsed {len(self.cameras)} cameras from stats: {[c.name for c in self.cameras]}", "info")
-                else:
-                    self.add_log("Stats received but no cameras found in response", "warning")
-                self._cameras_logged = True
-
-        self._render_summary(stats)
-        self._render_health()
-        self._update_connection()
-
-        # Try to render Cameras and Health content as soon as data is available.
-        # This helps populate the tabs even before the user switches to them
-        # (combined with the tab activation handler).
-        self.call_after_refresh(self._render_cameras)
-        self.call_after_refresh(self._render_health)
-
-
-
-        # Log to the right-hand activity window
-        # Always log errors immediately.
-        # Only log successful stats periodically (every 10s) or on recovery from error.
-        now = asyncio.get_event_loop().time()
-
-        if ok:
-            det = stats.get("detection_fps", 0) if stats else 0
-            should_log = (
-                now - self._last_stats_log_time > self.stats_log_interval or  # throttle successful logs
-                self._stats_had_error
-            )
-            if should_log:
-                self.add_log(f"Stats OK ({latency}ms) — detection {det:.1f} fps", "success")
-                self._last_stats_log_time = now
-                self._stats_had_error = False
-        else:
-            self.add_log(f"Stats poll failed: {err}", "error")
-            self._stats_had_error = True
-            self._last_stats_log_time = now  # ensure next success is logged promptly
+        await self.core.refresh_now()
 
     async def _refresh_events(self) -> None:
-        if getattr(self, "_use_mqtt_for_events", False) and not getattr(self, "_event_polling_active", False):
-            # We're getting events via MQTT instead (unless we fell back to polling)
-            return
+        # Core owns the cadence; manual nudge is a full refresh
+        await self.core.refresh_now()
 
-        if self.demo:
-            # In demo we just keep the last synthetic events if any
-            return
-        try:
-            assert self._client
-            events_raw = await self._client.get_events(limit=25, after=self._last_event_ts)
-            if not events_raw:
-                return
-
-            new_events: list[FrigateEvent] = []
-            for e in events_raw:
-                try:
-                    data = e.get("data", {}) or {}
-                    fe = FrigateEvent(
-                        id=str(e.get("id", "")),
-                        camera=str(e.get("camera", "unknown")),
-                        label=str(e.get("label", "object")),
-                        start_time=float(e.get("start_time", 0)),
-                        end_time=e.get("end_time"),
-                        top_score=e.get("top_score"),
-                        has_snapshot=bool(e.get("has_snapshot")),
-                        has_clip=bool(e.get("has_clip")),
-                        zones=e.get("zones") or [],
-                        sub_label=e.get("sub_label"),
-                        average_estimated_speed=data.get("average_estimated_speed"),
-                        velocity_angle=data.get("velocity_angle"),
-                        attributes=data.get("attributes") or [],
-                    )
-                    new_events.append(fe)
-                    if fe.start_time > (self._last_event_ts or 0):
-                        self._last_event_ts = fe.start_time
-                except Exception:
-                    continue
-
-            if new_events:
-                # Prepend newest, keep only the most recent N. Sort defensively so the list (and full re-renders) stay ordered by start recency.
-                combined = new_events + self.recent_events
-                self.recent_events = sorted(
-                    {e.id: e for e in combined}.values(),
-                    key=lambda x: x.start_time, reverse=True
-                )[: self.max_events]
-                self._render_events_table(new_events)  # only append the new ones for efficiency
-
-                for ev in new_events[:3]:  # log up to 3 new ones
-                    label = ev.display_label
-                    self.add_log(f"New event: {label} on {ev.camera}", "success")
-                if len(new_events) > 3:
-                    self.add_log(f"+{len(new_events)-3} more events", "info")
-        except Exception as e:
-            self.add_log(f"Events poll error: {e}", "warning")
-
-    async def _load_initial_events(self) -> None:
-        """Load a batch of recent historical events on startup so the Events tab isn't empty."""
-        if self.demo or not self._client:
-            return
-        try:
-            # Load a larger initial batch for good history on startup
-            events_raw = await self._client.get_events(limit=80)
-            if not events_raw:
-                self.add_log("No historical events found on startup", "info")
-                return
-
-            loaded_events: list[FrigateEvent] = []
-            latest_ts = self._last_event_ts or 0
-
-            for e in events_raw:
-                try:
-                    data = e.get("data", {}) or {}
-                    fe = FrigateEvent(
-                        id=str(e.get("id", "")),
-                        camera=str(e.get("camera", "unknown")),
-                        label=str(e.get("label", "object")),
-                        start_time=float(e.get("start_time", 0)),
-                        end_time=e.get("end_time"),
-                        top_score=e.get("top_score"),
-                        has_snapshot=bool(e.get("has_snapshot")),
-                        has_clip=bool(e.get("has_clip")),
-                        zones=e.get("zones") or [],
-                        sub_label=e.get("sub_label"),
-                        average_estimated_speed=data.get("average_estimated_speed"),
-                        velocity_angle=data.get("velocity_angle"),
-                        attributes=data.get("attributes") or [],
-                    )
-                    loaded_events.append(fe)
-                    if fe.start_time > latest_ts:
-                        latest_ts = fe.start_time
-                except Exception:
-                    continue
-
-            if loaded_events:
-                self.recent_events = sorted(loaded_events, key=lambda x: x.start_time, reverse=True)[:self.max_events]
-                self._last_event_ts = latest_ts
-                self._render_events_table(self.recent_events)
-                self.add_log(f"Loaded {len(self.recent_events)} historical events on startup", "info")
-
-        except Exception as e:
-            self.add_log(f"Failed to load initial historical events: {e}", "warning")
-
-    async def _load_initial_timeline(self) -> None:
-        """Load a few recent timeline entries on startup to seed the Activity Log."""
-        if self.demo or not self._client:
-            return
-        try:
-            timeline_raw = await self._client.get_timeline(limit=15, source="tracked_object")
-            if not timeline_raw:
-                return
-
-            loaded: list[TimelineEntry] = []
-            latest_ts = self._last_timeline_ts or 0
-
-            for t in timeline_raw:
-                try:
-                    ts = float(t.get("timestamp", 0))
-                    data = t.get("data", {}) or {}
-                    sub = data.get("sub_label")
-                    if isinstance(sub, list) and sub:
-                        sub = sub[0]
-                    entry = TimelineEntry(
-                        timestamp=ts,
-                        camera=str(t.get("camera", "unknown")),
-                        class_type=str(t.get("class_type", "")),
-                        source=str(t.get("source", "")),
-                        source_id=str(t.get("source_id", "")),
-                        label=str(data.get("label", "")),
-                        sub_label=sub if isinstance(sub, str) else None,
-                        score=data.get("score"),
-                        zones=data.get("zones") or [],
-                        attribute=str(data.get("attribute", "")),
-                    )
-                    loaded.append(entry)
-                    if ts > latest_ts:
-                        latest_ts = ts
-                except Exception:
-                    continue
-
-            if loaded:
-                self._last_timeline_ts = latest_ts
-                # Surface recent interesting ones (those with sub_labels or high confidence)
-                all_interesting = [
-                    e for e in sorted(loaded, key=lambda x: x.timestamp, reverse=True)
-                    if e.class_type in ("visible", "gone", "stationary") and (e.sub_label or (e.score or 0) > 0.8)
-                ]
-                to_surface = all_interesting[:3]  # most recent 3
-                for entry in reversed(to_surface):
-                    self._log_timeline_entry(entry)
-                if to_surface:
-                    self.add_log(f"Loaded {len(to_surface)} recent timeline items on startup", "info")
-
-        except Exception as e:
-            self.add_log(f"Failed to load initial timeline: {e}", "warning")
-
-    async def _refresh_reviews(self) -> None:
-        """Fetch recent review items and surface important ones (especially with sub_labels)."""
-        if self.demo or not self._client:
-            return
-        try:
-            reviews_raw = await self._client.get_review_items(limit=15, has_been_reviewed=False)
-            if not reviews_raw:
-                return
-
-            new_important = []
-            for r in reviews_raw:
-                try:
-                    start = float(r.get("start_time", 0))
-                    if self._last_review_ts and start <= self._last_review_ts:
-                        continue
-
-                    data = r.get("data", {}) or {}
-                    review = ReviewItem(
-                        id=str(r.get("id", "")),
-                        camera=str(r.get("camera", "unknown")),
-                        start_time=start,
-                        end_time=r.get("end_time"),
-                        severity=r.get("severity", "detection"),
-                        has_been_reviewed=bool(r.get("has_been_reviewed")),
-                        objects=data.get("objects") or [],
-                        sub_labels=data.get("sub_labels") or [],
-                        zones=data.get("zones") or [],
-                    )
-
-                    # Only surface high-value reviews (alerts with people or sub_labels)
-                    if review.severity == "alert" or review.sub_labels:
-                        new_important.append(review)
-
-                    if start > (self._last_review_ts or 0):
-                        self._last_review_ts = start
-                except Exception:
-                    continue
-
-            for rev in new_important[:5]:
-                msg = f"Review: {rev.severity.upper()} on {rev.camera}"
-                if rev.sub_labels:
-                    msg += f" — {', '.join(rev.sub_labels)}"
-                elif rev.objects:
-                    msg += f" — {', '.join(rev.objects)}"
-                self.add_log(msg, "warning" if rev.severity == "alert" else "info")
-
-        except Exception as e:
-            self.add_log(f"Review fetch error: {e}", "warning")
-
-    async def _refresh_timeline(self) -> None:
-        """Poll recent timeline entries and surface interesting ones to the Activity Log."""
-        if self.demo or not self._client:
-            return
-        try:
-            timeline_raw = await self._client.get_timeline(limit=20, after=self._last_timeline_ts, source="tracked_object")
-            if not timeline_raw:
-                return
-
-            for t in timeline_raw:
-                try:
-                    ts = float(t.get("timestamp", 0))
-                    if self._last_timeline_ts and ts <= self._last_timeline_ts:
-                        continue
-
-                    data = t.get("data", {}) or {}
-                    sub = data.get("sub_label")
-                    if isinstance(sub, list) and sub:
-                        sub = sub[0]
-                    entry = TimelineEntry(
-                        timestamp=ts,
-                        camera=str(t.get("camera", "unknown")),
-                        class_type=str(t.get("class_type", "")),
-                        source=str(t.get("source", "")),
-                        source_id=str(t.get("source_id", "")),
-                        label=str(data.get("label", "")),
-                        sub_label=sub if isinstance(sub, str) else None,
-                        score=data.get("score"),
-                        zones=data.get("zones") or [],
-                        attribute=str(data.get("attribute", "")),
-                    )
-
-                    if entry.class_type in ("visible", "gone", "stationary", "active"):
-                        if entry.sub_label or (entry.score or 0) > 0.85:
-                            self._log_timeline_entry(entry)
-
-                    if ts > (self._last_timeline_ts or 0):
-                        self._last_timeline_ts = ts
-                except Exception:
-                    continue
-
-        except Exception as e:
-            self.add_log(f"Timeline fetch error: {e}", "warning")
-
-    def _log_timeline_entry(self, entry: TimelineEntry) -> None:
-        """Format and log a single timeline entry to the Activity Log."""
-        sub = f" ({entry.sub_label})" if entry.sub_label else ""
-        score_str = f" ({entry.score:.0%})" if entry.score else ""
-        attr = f" [{entry.attribute}]" if entry.attribute else ""
-        zone = f" in {', '.join(entry.zones)}" if entry.zones else ""
-        msg = f"{entry.class_type.capitalize()}: {entry.label}{sub}{score_str}{attr}{zone} on {entry.camera}"
-        # visible is normal activity, gone is end of it, stationary might be warning-ish
-        level = "info" if entry.class_type == "visible" else ("warning" if entry.class_type == "stationary" else "dim")
-        self.add_log(msg, level)
-
-    async def _run_mqtt_listener(self) -> None:
-        """Background task that subscribes to Frigate events via MQTT."""
-        if not self.mqtt_config:
-            return
-
-        mqtt_cfg = self.mqtt_config
-        host = mqtt_cfg.get("host", "localhost")
-        port = int(mqtt_cfg.get("port", 1883))
-        username = mqtt_cfg.get("username")
-        password = mqtt_cfg.get("password")
-        topic_prefix = mqtt_cfg.get("topic_prefix", "frigate")
-
-        self.add_log(f"Connecting to MQTT at {host}:{port}...", "info")
-
-        try:
-            self._mqtt_client = FrigateMqttClient(
-                host=host,
-                port=port,
-                username=username,
-                password=password,
-                topic_prefix=topic_prefix,
-            )
-
-            async with self._mqtt_client:
-                connected = await self._mqtt_client.wait_until_connected(timeout=8.0)
-                if connected:
-                    self.add_log("MQTT connected — receiving events in real time", "success")
-                else:
-                    self.add_log("MQTT connection timeout — falling back to polling?", "warning")
-
-                async for event in self._mqtt_client.events():
-                    if self.demo:
-                        continue
-
-                    try:
-                        # Convert MQTT event to our internal model
-                        raw = event.raw or {}
-                        # Safely handle "after"/"before" which may be null in payloads
-                        after = raw.get("after") or {}
-                        before = raw.get("before") or {}
-                        data = raw.get("data") or after.get("data") or before.get("data") or {}
-                        fe = FrigateEvent(
-                            id=event.id or after.get("id") or before.get("id") or raw.get("id", ""),
-                            camera=event.camera,
-                            label=event.label,
-                            start_time=event.start_time,
-                            end_time=event.end_time,
-                            top_score=event.top_score,
-                            has_snapshot=event.has_snapshot,
-                            has_clip=event.has_clip,
-                            zones=event.zones or [],
-                            sub_label=raw.get("sub_label") or after.get("sub_label") or before.get("sub_label"),
-                            average_estimated_speed=data.get("average_estimated_speed"),
-                            velocity_angle=data.get("velocity_angle"),
-                            attributes=data.get("attributes") or [],
-                        )
-
-                        if fe.start_time > (self._last_event_ts or 0):
-                            self._last_event_ts = fe.start_time
-
-                        # Only insert new rows for truly new/recent starts or updates to ones we are already showing.
-                        # This prevents MQTT "update" messages for ancient historical events (which Frigate may emit)
-                        # from polluting the live "current" events feed with old items.
-                        is_tracked = any(e.id == fe.id for e in self.recent_events)
-                        if not is_tracked:
-                            current_min_start = min((e.start_time for e in self.recent_events), default=0)
-                            if event.type != "new" and fe.start_time < current_min_start:
-                                # Late update/end for an event older than our current window (not in initial 80 or trimmed); skip to keep feed current
-                                continue
-
-                        # Maintain recent_events: only reorder (to front) for new starts so table reflects start recency.
-                        # For updates to tracked, replace in-place so position (and thus table row) stays stable.
-                        if event.type == "new" or not is_tracked:
-                            self.recent_events = [fe] + [e for e in self.recent_events if e.id != fe.id][: self.max_events - 1]
-                        else:
-                            for i, e in enumerate(self.recent_events):
-                                if e.id == fe.id:
-                                    self.recent_events[i] = fe
-                                    break
-                            else:
-                                self.recent_events = [fe] + self.recent_events[: self.max_events - 1]
-
-                        # Keep the list canonically sorted newest-start-first (defensive; full re-renders on tab switch rely on this for "current" view)
-                        self.recent_events = sorted(
-                            {e.id: e for e in self.recent_events}.values(),
-                            key=lambda x: x.start_time, reverse=True
-                        )[: self.max_events]
-
-                        self._render_events_table([fe])
-
-                        label = fe.display_label
-                        if event.type == "new" or not is_tracked:
-                            self.add_log(f"New event (MQTT): {label} on {fe.camera}", "success")
-                        elif event.type == "end":
-                            self.add_log(f"Event ended (MQTT): {label} on {fe.camera}", "info")
-                    except Exception as e:
-                        self.add_log(f"MQTT event parse/render error: {e}", "warning")
-                        continue
-
-        except Exception as e:
-            self.add_log(f"MQTT listener error: {e}", "error")
-            if not getattr(self, "_event_polling_active", False):
-                self.set_interval(max(2.0, self.poll_interval * 2), self._refresh_events)
-                self._event_polling_active = True
-                self.add_log("MQTT failed — falling back to event polling", "warning")
-
-    # ------------------------------------------------------------------
-    # Rendering
-    # ------------------------------------------------------------------
-
-    def _demo_stats(self) -> dict[str, Any]:
-        return {
-            "cameras": {
-                "backdeck": {"camera_fps": 5.0, "process_fps": 5.0, "detection_fps": 4.9, "skipped_fps": 0.0, "detection_enabled": True},
-                "fronthouse": {"camera_fps": 5.0, "process_fps": 4.8, "detection_fps": 1.8, "skipped_fps": 0.4, "detection_enabled": True},
-                "driveway": {"camera_fps": 4.0, "process_fps": 4.0, "detection_fps": 3.9, "skipped_fps": 0.0, "detection_enabled": True},
-            },
-            "detection_fps": 13.8,
-            "skipped_fps": 0.4,
-            "gpu_usages": {"NVIDIA GeForce RTX 5060 Ti": {"gpu": "9.0%", "mem": "28.4%"}},
-            "service": {"uptime": 48231},
-        }
+    # Rendering methods below are intentionally kept (they are TUI-specific and
+    # operate on the reactives that are kept in sync by _on_core_update).
+    # The data that drives them now comes exclusively from the shared core.
 
     def _render_summary(self, stats: dict[str, Any] | None) -> None:
         if not stats:
@@ -1065,23 +615,16 @@ class FrigateMonitor(App[None]):
             self.add_log(f"Failed to render health tab: {type(e).__name__}: {e}", "error")
 
     def _update_connection(self) -> None:
+        """Drive the bottom status bar from current connection reactives.
+
+        Logging of connect/lost transitions is now owned exclusively by the core
+        (ensures identical messages in TUI and web UIs).
+        """
         try:
             status_widget = self.query_one(ConnectionStatus)
             status_widget.update_status(
                 self.frigate_url, self.connection_ok, self.latency_ms, self.last_error
             )
-
-            # Log state changes to the activity log (avoid spamming on every poll)
-            if self.connection_ok and self.last_error is None:
-                # Only log successful connection once per state change
-                if not getattr(self, "_logged_connected", False):
-                    self.add_log("Connection established", "success")
-                    self._logged_connected = True
-            else:
-                if getattr(self, "_logged_connected", False):
-                    err = self.last_error or "unknown error"
-                    self.add_log(f"Connection lost: {err}", "error")
-                    self._logged_connected = False
         except Exception:
             pass
 
@@ -1090,19 +633,8 @@ class FrigateMonitor(App[None]):
     # ------------------------------------------------------------------
 
     async def action_quit(self) -> None:
-        if self._client:
-            await self._client.aclose()
-
-        if self._mqtt_task and not self._mqtt_task.done():
-            self._mqtt_task.cancel()
-            try:
-                await self._mqtt_task
-            except asyncio.CancelledError:
-                pass
-
-        if self._mqtt_client:
-            await self._mqtt_client.disconnect()
-
+        # Core owns clients + tasks; it will cancel and close everything cleanly.
+        await self.core.stop()
         self.exit()
 
     async def action_refresh(self) -> None:

@@ -193,3 +193,95 @@ class TimelineEntry:
     score: float | None = None
     zones: list[str] = field(default_factory=list)
     attribute: str = ""
+
+
+# ------------------------------------------------------------------
+# Normalization helpers (used by core to avoid duplication across
+# REST poll, initial load, and MQTT paths; also available to web/TUI)
+# ------------------------------------------------------------------
+
+def frigate_event_from_dict(raw: dict[str, Any], *, data: dict[str, Any] | None = None) -> FrigateEvent | None:
+    """Normalize a raw event dict (from /api/events or similar) into FrigateEvent.
+
+    The 'data' sub-dict (for speed/attributes) can be passed explicitly or will be
+    taken from raw["data"]. Returns None if essential fields cannot be parsed.
+    """
+    try:
+        if data is None:
+            data = raw.get("data", {}) or {}
+        end_time = raw.get("end_time")
+        if end_time is not None:
+            try:
+                end_time = float(end_time)
+            except Exception:
+                end_time = None
+        return FrigateEvent(
+            id=str(raw.get("id", "")),
+            camera=str(raw.get("camera", "unknown")),
+            label=str(raw.get("label", "object")),
+            start_time=float(raw.get("start_time", 0)),
+            end_time=end_time,
+            top_score=raw.get("top_score"),
+            has_snapshot=bool(raw.get("has_snapshot")),
+            has_clip=bool(raw.get("has_clip")),
+            zones=raw.get("zones") or [],
+            sub_label=raw.get("sub_label"),
+            average_estimated_speed=data.get("average_estimated_speed"),
+            velocity_angle=data.get("velocity_angle"),
+            attributes=data.get("attributes") or [],
+        )
+    except Exception:
+        return None
+
+
+def review_item_from_dict(raw: dict[str, Any]) -> ReviewItem | None:
+    """Normalize a raw review item (from /api/review) into ReviewItem."""
+    try:
+        start = float(raw.get("start_time", 0))
+        end = raw.get("end_time")
+        if end is not None:
+            try:
+                end = float(end)
+            except Exception:
+                end = None
+        data = raw.get("data", {}) or {}
+        return ReviewItem(
+            id=str(raw.get("id", "")),
+            camera=str(raw.get("camera", "unknown")),
+            start_time=start,
+            end_time=end,
+            severity=str(raw.get("severity", "detection")),
+            has_been_reviewed=bool(raw.get("has_been_reviewed")),
+            objects=data.get("objects") or [],
+            sub_labels=data.get("sub_labels") or [],
+            zones=data.get("zones") or [],
+        )
+    except Exception:
+        return None
+
+
+def timeline_entry_from_dict(raw: dict[str, Any]) -> TimelineEntry | None:
+    """Normalize a raw timeline entry (from /api/timeline) into TimelineEntry.
+
+    Handles sub_label that may be a list in the payload.
+    """
+    try:
+        ts = float(raw.get("timestamp", 0))
+        data = raw.get("data", {}) or {}
+        sub = data.get("sub_label")
+        if isinstance(sub, list) and sub:
+            sub = sub[0]
+        return TimelineEntry(
+            timestamp=ts,
+            camera=str(raw.get("camera", "unknown")),
+            class_type=str(raw.get("class_type", "")),
+            source=str(raw.get("source", "")),
+            source_id=str(raw.get("source_id", "")),
+            label=str(data.get("label", "")),
+            sub_label=sub if isinstance(sub, str) else None,
+            score=data.get("score"),
+            zones=data.get("zones") or [],
+            attribute=str(data.get("attribute", "")),
+        )
+    except Exception:
+        return None

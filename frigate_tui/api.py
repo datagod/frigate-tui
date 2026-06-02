@@ -84,3 +84,20 @@ class FrigateClient:
             params["source"] = source
         data = await self._get("/api/timeline", **params)
         return data if isinstance(data, list) else []
+
+    async def get_snapshot(self, event_id: str, **params: Any) -> bytes:
+        """Fetch snapshot image for an event (binary JPEG).
+
+        Supports Frigate query params such as bbox=1, crop=1, quality=80, etc.
+        """
+        url = f"{self.base_url}/api/events/{event_id}/snapshot.jpg"
+        resp = await self._client.get(url, params=params or None)
+        resp.raise_for_status()
+        return resp.content
+
+    async def get_clip(self, event_id: str) -> bytes:
+        """Fetch the clip (mp4) for an event, if available."""
+        url = f"{self.base_url}/api/events/{event_id}/clip.mp4"
+        resp = await self._client.get(url)
+        resp.raise_for_status()
+        return resp.content

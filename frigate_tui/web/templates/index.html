@@ -1,0 +1,621 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Frigate TUI — Web</title>
+  <!-- Tailwind Play CDN: zero-build, perfect for a self-contained local dashboard -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --panel: #161b26;
+      --border: #4a5263;
+      --text: #c0c5d1;
+      --dim: #6b7280;
+    }
+    body { background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .font-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+
+    .panel { background: var(--panel); border: 1px solid var(--border); }
+    .section-title { color: #a5b4fc; font-weight: 600; }
+
+    .metric-value { font-weight: 700; }
+    .good { color: #22c55e; }
+    .warn { color: #eab308; }
+    .bad  { color: #ef4444; }
+    .dim  { color: #6b7280; }
+
+    .event-person { color: #ff6b6b; }
+    .event-car    { color: #4ecdc4; }
+    .event-dog    { color: #f7b731; }
+    .event-cat    { color: #a55eea; }
+
+    .log-success { color: #22c55e; }
+    .log-error   { color: #ef4444; }
+    .log-warning { color: #eab308; }
+    .log-info    { color: #9ca3af; }
+
+    .bar-track { background: #272e3b; height: 10px; border-radius: 9999px; overflow: hidden; }
+    .bar-fill  { height: 100%; transition: width .15s linear; }
+
+    .tab { padding: 0.25rem 0.75rem; border-radius: 0.375rem; cursor: pointer; }
+    .tab.active { background: #272e3b; color: #c0c5d1; font-weight: 600; }
+
+    .status-dot { display: inline-block; width: 10px; height: 10px; border-radius: 9999px; }
+    .conn-bar { background: #1a1f2e; font-size: 0.875rem; }
+
+    .camera-card { background: #161b26; border: 1px solid #4a5263; }
+    .activity-log { background: #0c0e14; border-left: 1px solid #4a5263; }
+
+    table.data-table { background: #0f1117; }
+    .data-table th, .data-table td { padding: 4px 8px; }
+    .data-table tr:nth-child(even) { background: #161b26; }
+
+    .modal { background: rgba(15,17,23,0.92); }
+  </style>
+</head>
+<body class="min-h-screen text-sm">
+  <!-- Header -->
+  <div class="flex items-center justify-between px-4 py-2 border-b border-[#4a5263] bg-[#161b26]">
+    <div class="flex items-center gap-3">
+      <div class="text-lg font-semibold tracking-tight">Frigate TUI <span class="text-xs align-super text-[#a5b4fc] font-mono">web</span></div>
+      {% if demo %}
+      <span class="px-2 py-0.5 text-[10px] rounded bg-yellow-500/20 text-yellow-400 border border-yellow-500/40">DEMO MODE</span>
+      {% endif %}
+      <div class="text-[#6b7280] text-xs">v0.1 • <span id="frigate-ver">{{ snapshot.frigate_version or '?' }}</span></div>
+    </div>
+    <div class="flex items-center gap-2">
+      <button onclick="doRefresh()" class="px-3 py-1 rounded bg-[#272e3b] hover:bg-[#3a4255] active:bg-[#4a5263] text-xs">r — Refresh</button>
+      <button onclick="clearLog()" class="px-3 py-1 rounded bg-[#272e3b] hover:bg-[#3a4255] text-xs">c — Clear Log</button>
+      <button onclick="showHelp()" class="px-3 py-1 rounded bg-[#272e3b] hover:bg-[#3a4255] text-xs">? Help</button>
+      <div class="text-[#6b7280] text-xs ml-2" id="target-url">{{ snapshot.frigate_url }}</div>
+    </div>
+  </div>
+
+  <!-- Global Summary Strip (matches TUI) -->
+  <div class="px-4 py-2 panel mx-3 mt-3 flex items-center gap-x-8 text-sm">
+    <div><span class="text-[#6b7280] font-semibold">FRIGATE</span> <span id="sum-frigate" class="metric-value good">{{ snapshot.frigate_version or '—' }}</span></div>
+    <div><span class="text-[#6b7280] font-semibold">DETECTION</span> <span id="sum-detection" class="metric-value">{{ (snapshot.summary.detection_fps or 0)|round(1) }}</span></div>
+    <div><span class="text-[#6b7280] font-semibold">GPU</span> <span id="sum-gpu" class="metric-value">{{ snapshot.summary.gpu or '—' }}</span></div>
+    <div><span class="text-[#6b7280] font-semibold">SKIPPED</span> <span id="sum-skipped" class="metric-value">{{ (snapshot.summary.skipped_fps or 0)|round(1) }}</span></div>
+    <div class="ml-auto text-[10px] text-[#6b7280]">Live via core • SSE • identical logic to TUI</div>
+  </div>
+
+  <!-- Main split: left content + right activity log (58/42 like TUI) -->
+  <div class="flex gap-0 px-3 mt-3" style="height: calc(100vh - 168px);">
+    <!-- Left panel (tabs) -->
+    <div class="flex-1 min-w-[420px] pr-2 flex flex-col" style="flex-basis: 58%;">
+      <!-- Tab bar -->
+      <div class="flex gap-1 mb-2 text-sm">
+        <div onclick="switchTab('overview')" id="tab-overview" class="tab active">Overview</div>
+        <div onclick="switchTab('cameras')"  id="tab-cameras"  class="tab">Cameras</div>
+        <div onclick="switchTab('events')"   id="tab-events"   class="tab">Events</div>
+        <div onclick="switchTab('health')"   id="tab-health"   class="tab">Health / Queues</div>
+      </div>
+
+      <!-- Tab contents -->
+      <div class="panel flex-1 overflow-auto p-3" id="tab-content">
+        <!-- Overview -->
+        <div id="pane-overview">
+          <div class="text-[#a5b4fc] font-semibold mb-2">Welcome to Frigate TUI (Web)</div>
+          <div class="text-[#6b7280] leading-snug">
+            This dashboard has <span class="text-white">exact feature parity</span> with the terminal UI because both
+            are driven by the same <code class="text-amber-400">FrigateMonitorCore</code>.<br><br>
+            Live updates arrive over SSE. Activity Log messages, health calculations, event ordering, and MQTT vs poll
+            behavior are identical to the TUI.
+          </div>
+          <div class="mt-4 text-xs text-[#6b7280]">
+            Useful keys (global): <span class="font-mono">1-4</span> switch tabs • <span class="font-mono">r</span> refresh • <span class="font-mono">c</span> clear log • <span class="font-mono">?</span> help<br>
+            Click any event row for snapshot + clip links (when available).
+          </div>
+        </div>
+
+        <!-- Cameras -->
+        <div id="pane-cameras" class="hidden">
+          <div class="text-xs text-[#6b7280] mb-2" id="cameras-legend">
+            Legend: Camera Input = raw frames • Processing = ingest speed • Detection = AI analyzed<br>
+            <span class="good">Green=Healthy</span> <span class="warn">Yellow=Degraded</span> <span class="bad">Red=Overloaded</span> <span class="dim">Gray=Disabled</span>
+          </div>
+          <div id="cameras-grid" class="grid grid-cols-1 xl:grid-cols-2 gap-2"></div>
+        </div>
+
+        <!-- Events -->
+        <div id="pane-events" class="hidden">
+          <div class="text-xs text-[#6b7280] mb-1">Newest on top. Click row for details &amp; snapshot.</div>
+          <div class="overflow-auto max-h-[calc(100vh-260px)]">
+            <table class="data-table w-full text-xs border-collapse" id="events-table">
+              <thead>
+                <tr class="text-left text-[#6b7280] border-b border-[#4a5263]">
+                  <th class="w-16">Time</th>
+                  <th class="w-28">Camera</th>
+                  <th>Label</th>
+                  <th class="w-14">Speed</th>
+                  <th class="w-12">Score</th>
+                  <th class="w-12">Dur</th>
+                  <th class="w-6">📼</th>
+                  <th class="w-6">📷</th>
+                </tr>
+              </thead>
+              <tbody id="events-tbody" class="font-mono"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Health -->
+        <div id="pane-health" class="hidden">
+          <div id="health-pressure" class="metric-value text-lg mb-3"></div>
+          <div id="health-skipped" class="text-sm text-[#6b7280]"></div>
+          <div class="mt-4 text-xs text-[#6b7280]">
+            Pressure = expected camera fps − actual detection fps.<br>
+            High pressure + skipped frames = pipeline backup (the core signal the TUI was built to surface).
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: Activity Log (matches TUI right panel) -->
+    <div class="w-[42%] min-w-[320px] flex flex-col panel activity-log" style="flex-basis: 42%;">
+      <div class="px-3 py-1 text-xs font-semibold section-title bg-[#1a1f2e] border-b border-[#4a5263] flex items-center justify-between">
+        <span>Activity Log</span>
+        <span id="log-status" class="text-[10px] ml-2" title="Connecting...">●</span>
+      </div>
+      <div id="activity-log" class="flex-1 overflow-auto p-2 text-xs font-mono leading-tight whitespace-pre-wrap"></div>
+      <div class="px-2 py-1 text-[10px] text-[#6b7280] border-t border-[#4a5263]">Core emits the exact same messages as the TUI</div>
+    </div>
+  </div>
+
+  <!-- Connection status bar (bottom, matches TUI ConnectionStatus widget) -->
+  <div id="conn-bar" class="conn-bar fixed bottom-0 left-0 right-0 px-3 py-px flex items-center gap-2 text-xs border-t border-[#4a5263]">
+    <span class="text-[#6b7280]">Target:</span>
+    <span id="conn-url" class="text-cyan-400">{{ snapshot.frigate_url }}</span>
+    <span id="conn-status" class="ml-2"></span>
+  </div>
+
+  <!-- Event detail modal -->
+  <div id="modal" onclick="hideModal()" class="hidden fixed inset-0 z-50 items-center justify-center">
+    <div onclick="event.stopImmediatePropagation()" class="modal w-[min(92vw,820px)] rounded-lg border border-[#4a5263] p-4">
+      <div class="flex justify-between items-center mb-2">
+        <div id="modal-title" class="font-semibold"></div>
+        <button onclick="hideModal()" class="text-[#6b7280] hover:text-white">✕</button>
+      </div>
+      <div id="modal-body" class="text-sm"></div>
+      <div id="modal-media" class="mt-3"></div>
+    </div>
+  </div>
+
+  <script>
+    // Tailwind script run (play CDN)
+    function initTailwind() {
+      // Already loaded via CDN; we can extend if needed
+    }
+
+    let currentTab = 'overview';
+    let es = null; // EventSource
+
+    function switchTab(name) {
+      document.querySelectorAll('[id^="pane-"]').forEach(el => el.classList.add('hidden'));
+      document.querySelectorAll('[id^="tab-"]').forEach(el => el.classList.remove('active'));
+      const pane = document.getElementById('pane-' + name);
+      const tab = document.getElementById('tab-' + name);
+      if (pane) pane.classList.remove('hidden');
+      if (tab) tab.classList.add('active');
+      currentTab = name;
+
+      // Lazy render for cameras when first shown (in case initial render missed)
+      if (name === 'cameras' && window.__lastCameras) {
+        renderCameras(window.__lastCameras);
+      }
+      if (name === 'events' && window.__lastEvents) {
+        renderEvents(window.__lastEvents, true);
+      }
+    }
+
+    function setSummary(snap) {
+      const s = snap.summary || {};
+      const elDet = document.getElementById('sum-detection');
+      const elGpu = document.getElementById('sum-gpu');
+      const elSk  = document.getElementById('sum-skipped');
+      if (elDet) {
+        elDet.textContent = (s.detection_fps || 0).toFixed(1);
+        elDet.className = 'metric-value ' + (s.detection_fps > 8 ? 'good' : (s.detection_fps > 2 ? 'warn' : 'bad'));
+      }
+      if (elGpu) elGpu.textContent = s.gpu || '—';
+      if (elSk) {
+        elSk.textContent = (s.skipped_fps || 0).toFixed(1);
+        elSk.className = 'metric-value ' + ((s.skipped_fps || 0) > 0.05 ? 'bad' : 'good');
+      }
+      const v = document.getElementById('frigate-ver');
+      if (v && snap.frigate_version) v.textContent = snap.frigate_version;
+    }
+
+    function renderCameras(cams) {
+      window.__lastCameras = cams;
+      const grid = document.getElementById('cameras-grid');
+      if (!grid) return;
+      grid.innerHTML = '';
+
+      if (!cams || !cams.length) {
+        grid.innerHTML = '<div class="text-[#6b7280] text-xs">No cameras reported yet.</div>';
+        return;
+      }
+
+      cams.forEach(cam => {
+        const card = document.createElement('div');
+        card.className = 'camera-card rounded p-2 text-xs';
+
+        const status = cam.detection_enabled ? 'ON' : 'OFF';
+        const statusColor = cam.health_color || 'dim';
+
+        card.innerHTML = `
+          <div class="flex items-center justify-between mb-1">
+            <span class="font-semibold">${cam.name}</span>
+            <span class="${cam.health_color || ''}">${cam.health_summary || ''}</span>
+            <span class="${statusColor} font-mono text-[10px]">${status}</span>
+          </div>
+          <div class="space-y-1">
+            ${barRow('Camera Input', cam.camera_fps, 15)}
+            ${barRow('Processing', cam.process_fps, 15)}
+            ${barRow('Detection', cam.detection_fps, 15, cam.health_color)}
+          </div>
+        `;
+        grid.appendChild(card);
+      });
+    }
+
+    function barRow(label, value, maxVal, colorClass) {
+      const pct = Math.max(0, Math.min(100, (value / maxVal) * 100));
+      const fillColor = (colorClass === 'red') ? 'bg-red-500' :
+                        (colorClass === 'yellow') ? 'bg-yellow-400' :
+                        (colorClass === 'dim') ? 'bg-zinc-500' : 'bg-emerald-500';
+      return `
+        <div class="flex items-center gap-2">
+          <div class="w-24 text-[#6b7280]">${label}</div>
+          <div class="flex-1 bar-track"><div class="bar-fill ${fillColor}" style="width:${pct}%"></div></div>
+          <div class="w-12 text-right font-mono ${colorClass || ''}">${Number(value).toFixed(1)}</div>
+        </div>
+      `;
+    }
+
+    function renderEvents(events, forceFull) {
+      window.__lastEvents = events;
+      const tbody = document.getElementById('events-tbody');
+      if (!tbody) return;
+
+      if (forceFull) tbody.innerHTML = '';
+
+      if (!events || !events.length) {
+        if (tbody.children.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="8" class="text-[#6b7280] p-2">No events yet.</td></tr>';
+        }
+        return;
+      }
+
+      // For simplicity and to guarantee newest-first order we do a full rebuild when asked.
+      // Incremental prepend is also possible but ordering is critical (same reason TUI does full rebuilds on new ids).
+      if (forceFull || tbody.children.length === 0 || (events.length > 1)) {
+        tbody.innerHTML = '';
+        events.forEach(ev => appendEventRow(tbody, ev, true));
+      } else {
+        // single new event append at top
+        const first = events[0];
+        appendEventRow(tbody, first, false);
+        // trim DOM rows if too many (defensive)
+        while (tbody.children.length > 160) {
+          tbody.removeChild(tbody.lastChild);
+        }
+      }
+    }
+
+    function appendEventRow(tbody, ev, atEnd) {
+      const tr = document.createElement('tr');
+      tr.className = 'border-b border-[#272e3b] hover:bg-[#1f2533] cursor-pointer';
+      tr.onclick = () => showEventModal(ev);
+
+      const ts = new Date((ev.start_time || 0) * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+      const dur = ev.duration_s ? ev.duration_s.toFixed(1) + 's' : '—';
+      const score = ev.top_score != null ? ev.top_score.toFixed(2) : '—';
+      const speed = ev.average_estimated_speed != null ? ev.average_estimated_speed.toFixed(1) : '—';
+      const clip = ev.has_clip ? '📼' : '';
+      const snap = ev.has_snapshot ? '📷' : '';
+
+      const labelHtml = `<span style="color:${ev.color || '#c0c5d1'}">${ev.display_label || ev.label}</span>`;
+
+      tr.innerHTML = `
+        <td class="font-mono text-[#6b7280]">${ts}</td>
+        <td>${ev.camera}</td>
+        <td>${labelHtml}</td>
+        <td class="font-mono">${speed}</td>
+        <td class="font-mono">${score}</td>
+        <td class="font-mono">${dur}</td>
+        <td class="text-center">${clip}</td>
+        <td class="text-center">${snap}</td>
+      `;
+      if (atEnd) tbody.appendChild(tr);
+      else tbody.insertBefore(tr, tbody.firstChild);
+    }
+
+    function renderHealth(h) {
+      const p = document.getElementById('health-pressure');
+      const s = document.getElementById('health-skipped');
+      if (!p || !s) return;
+      if (!h) {
+        p.textContent = 'No health data yet.';
+        s.textContent = '';
+        return;
+      }
+      const color = h.status_color || 'good';
+      p.innerHTML = `<span class="${color}">DETECTION PRESSURE</span><br>` +
+                    `Expected: ${h.expected_fps} fps &nbsp; Actual: ${h.detection_fps} &nbsp; ` +
+                    `Backlog: ${h.detection_pressure} (${(h.pressure_pct*100).toFixed(0)}%)`;
+      s.innerHTML = `Skipped frames / sec: <span class="${color}">${h.skipped_fps}</span><br>` +
+                    `Pipeline healthy: <span class="${h.is_healthy ? 'good' : 'bad'}">${h.is_healthy}</span>`;
+    }
+
+    function updateConnection(conn) {
+      const bar = document.getElementById('conn-status');
+      if (!bar || !conn) return;
+      const ok = conn.ok;
+      const url = document.getElementById('conn-url');
+      if (url && conn.url) url.textContent = conn.url;
+
+      if (ok) {
+        bar.innerHTML = `<span class="status-dot bg-emerald-500"></span> <span class="text-emerald-400">CONNECTED</span>` +
+                        (conn.latency_ms != null ? ` <span class="text-[#6b7280]">${conn.latency_ms}ms</span>` : '');
+      } else {
+        bar.innerHTML = `<span class="status-dot bg-red-500"></span> <span class="text-red-400">OFFLINE — retrying</span>` +
+                        (conn.last_error ? ` <span class="text-[#6b7280]">${conn.last_error}</span>` : '');
+      }
+    }
+
+    function updateLogStatus(connected) {
+      const s = document.getElementById('log-status');
+      if (!s) return;
+      if (connected) {
+        s.className = 'text-[10px] ml-2 text-emerald-400';
+        s.title = 'Live updates connected';
+        s.textContent = '●';
+      } else {
+        s.className = 'text-[10px] ml-2 text-red-400';
+        s.title = 'Disconnected — retrying...';
+        s.textContent = '●';
+      }
+    }
+
+    function appendLog(entry) {
+      const log = document.getElementById('activity-log');
+      if (!log) return;
+      const div = document.createElement('div');
+      const level = entry.level || 'info';
+      let prefix = '•';
+      let cls = 'log-info';
+      if (level === 'error')   { prefix = '✗'; cls = 'log-error'; }
+      else if (level === 'success') { prefix = '✓'; cls = 'log-success'; }
+      else if (level === 'warning') { prefix = '!'; cls = 'log-warning'; }
+
+      div.className = cls;
+      div.textContent = `[${entry.ts || ''}] ${prefix} ${entry.message || ''}`;
+      log.appendChild(div);
+
+      // Auto scroll
+      log.scrollTop = log.scrollHeight;
+
+      // Cap DOM nodes
+      while (log.children.length > 220) log.removeChild(log.firstChild);
+    }
+
+    function applySnapshot(snap) {
+      if (!snap) return;
+      setSummary(snap);
+
+      // Cameras
+      renderCameras(snap.cameras || []);
+
+      // Events (initial authoritative list)
+      renderEvents(snap.recent_events || [], true);
+
+      // Health
+      renderHealth(snap.health);
+
+      // Connection
+      updateConnection(snap.connection || {ok: true, url: snap.frigate_url});
+
+      // Logs (replay recent)
+      const logEl = document.getElementById('activity-log');
+      if (logEl) logEl.innerHTML = '';
+      (snap.logs || []).forEach(l => appendLog(l));
+    }
+
+    // ---------------- Live updates via SSE ----------------
+    function connectSSE() {
+      if (es) es.close();
+      es = new EventSource('/api/stream');
+
+      es.onopen = () => {
+        updateLogStatus(true);
+      };
+
+      es.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          handleSSE(msg);
+        } catch (e) {}
+      };
+
+      es.onerror = () => {
+        updateLogStatus(false);
+        // Browser auto-retries, but we can force a reconnect after a short delay
+        // if it stays closed (helps in some proxy/Docker port forward scenarios)
+        setTimeout(() => {
+          if (es && es.readyState === 2 /* CLOSED */) {
+            connectSSE();
+          }
+        }, 2500);
+      };
+    }
+
+    function handleSSE(msg) {
+      if (!msg || !msg.type) return;
+      const data = msg.data;
+
+      switch (msg.type) {
+        case 'hello':
+          break;
+        case 'log':
+          appendLog(data);
+          break;
+        case 'stats':
+          // Only need summary numbers
+          if (data) {
+            const det = data.detection_fps || 0;
+            const sk = data.skipped_fps || 0;
+            const detEl = document.getElementById('sum-detection');
+            if (detEl) {
+              detEl.textContent = Number(det).toFixed(1);
+              detEl.className = 'metric-value ' + (det > 8 ? 'good' : (det > 2 ? 'warn' : 'bad'));
+            }
+            const skEl = document.getElementById('sum-skipped');
+            if (skEl) {
+              skEl.textContent = Number(sk).toFixed(1);
+              skEl.className = 'metric-value ' + (sk > 0.05 ? 'bad' : 'good');
+            }
+            const gpus = data.gpu_usages || {};
+            if (Object.keys(gpus).length) {
+              const g = document.getElementById('sum-gpu');
+              if (g) g.textContent = Object.values(gpus)[0].gpu || '—';
+            }
+          }
+          break;
+        case 'cameras':
+          renderCameras(data || []);
+          break;
+        case 'health':
+          renderHealth(data);
+          break;
+        case 'events':
+          // Authoritative list from core (newest first)
+          renderEvents(data || [], true);
+          break;
+        case 'connection':
+          updateConnection(data);
+          break;
+        case 'version':
+          const v = document.getElementById('frigate-ver');
+          if (v && data) v.textContent = data;
+          break;
+      }
+    }
+
+    // ---------------- Actions ----------------
+    async function doRefresh() {
+      try {
+        await fetch('/api/refresh', { method: 'POST' });
+        // Core will push updates via SSE
+      } catch (e) {}
+    }
+
+    function clearLog() {
+      const log = document.getElementById('activity-log');
+      if (log) log.innerHTML = '';
+    }
+
+    function showHelp() {
+      alert('Keys: 1-4 switch tabs • r refresh • c clear log • ? this help\n\n' +
+            'The web UI receives the exact same log messages, camera health, event ordering, and pressure calculations as the terminal TUI because they share FrigateMonitorCore.');
+    }
+
+    function showEventModal(ev) {
+      const modal = document.getElementById('modal');
+      const title = document.getElementById('modal-title');
+      const body = document.getElementById('modal-body');
+      const media = document.getElementById('modal-media');
+
+      title.textContent = `${ev.camera} — ${ev.display_label || ev.label} @ ${new Date(ev.start_time*1000).toLocaleTimeString()}`;
+      body.innerHTML = `
+        <div>Score: ${ev.top_score != null ? ev.top_score.toFixed(2) : '—'} &nbsp; Duration: ${ev.duration_s ? ev.duration_s.toFixed(1)+'s' : '—'}</div>
+        <div>Zones: ${(ev.zones||[]).join(', ') || '—'}</div>
+        <div>Speed: ${ev.average_estimated_speed != null ? ev.average_estimated_speed.toFixed(1) : '—'} ${ev.velocity_angle != null ? ' @ ' + ev.velocity_angle.toFixed(0) + '°' : ''}</div>
+      `;
+
+      media.innerHTML = '';
+      // Media is now proxied through the web server (/api/snapshot, /api/clip)
+      // so the browser never needs a direct route to Frigate. This works even when
+      // the server reaches Frigate via localhost / Docker networking but the browser
+      // cannot.
+
+      if (ev.has_snapshot) {
+        const img = document.createElement('img');
+        // Request with bbox=1 so the detected object box is drawn (more useful than raw frame)
+        img.src = `/api/snapshot/${ev.id}?bbox=1`;
+        img.className = 'max-h-64 rounded border border-[#4a5263]';
+        img.onerror = () => { img.alt = 'Snapshot not available (may have expired, not recorded, or an error occurred)'; };
+        media.appendChild(img);
+      }
+      if (ev.has_clip) {
+        const a = document.createElement('a');
+        a.href = `/api/clip/${ev.id}`;
+        a.target = '_blank';
+        a.className = 'inline-block mt-2 underline';
+        a.textContent = '📼 Open clip in new tab';
+        media.appendChild(a);
+      }
+      if (!ev.has_snapshot && !ev.has_clip) {
+        media.innerHTML = '<div class="text-xs text-[#6b7280]">No media for this event.</div>';
+      }
+
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+    }
+
+    function hideModal() {
+      const modal = document.getElementById('modal');
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+    }
+
+    // Keyboard support (parity with TUI where sensible)
+    function initKeyboard() {
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'r' || e.key === 'R') { doRefresh(); e.preventDefault(); }
+        if (e.key === 'c' || e.key === 'C') { clearLog(); e.preventDefault(); }
+        if (e.key === '?') { showHelp(); e.preventDefault(); }
+        if (e.key === '1') { switchTab('overview'); e.preventDefault(); }
+        if (e.key === '2') { switchTab('cameras'); e.preventDefault(); }
+        if (e.key === '3') { switchTab('events'); e.preventDefault(); }
+        if (e.key === '4') { switchTab('health'); e.preventDefault(); }
+        if (e.key.toLowerCase() === 'escape') { hideModal(); }
+      });
+    }
+
+    // Boot
+    function boot() {
+      initTailwind();
+
+      // Initial data from server-rendered snapshot (great first paint)
+      const snap = {{ snapshot | tojson }};
+      applySnapshot(snap);
+
+      // Start on overview
+      switchTab('overview');
+
+      // Connect live updates
+      updateLogStatus(false); // initial state
+      connectSSE();
+
+      initKeyboard();
+
+      // Gentle nudge for cameras if tab never activated
+      setTimeout(() => {
+        if (window.__lastCameras && window.__lastCameras.length) {
+          // already rendered via applySnapshot
+        }
+      }, 800);
+
+      // Snapshots and clips are now served through the web server (/api/snapshot, /api/clip)
+      // so they should load even if your browser cannot directly reach Frigate.
+    }
+
+    window.addEventListener('load', boot);
+  </script>
+</body>
+</html>

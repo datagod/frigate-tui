@@ -20,3 +20,6 @@ mqtt:
   username: ""
   password: ""
   topic_prefix: "frigate"
+
+# The same config file works for both the TUI (`frigate-tui`) and the web UI (`frigate-tui web`).
+# Web UI is served on :8080 by default (override with --port). See README for [web] install.
