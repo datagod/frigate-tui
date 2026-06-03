@@ -225,7 +225,9 @@ class FrigateMonitorCore:
         self._notify("version", self._frigate_version)
 
         # Seed initial data (non-demo)
-        if not self.demo:
+        if self.demo:
+            self._seed_demo_events()
+        else:
             await self._load_initial_events()
             await self._load_initial_timeline()
 
@@ -756,3 +758,63 @@ class FrigateMonitorCore:
             "gpu_usages": {"NVIDIA GeForce RTX 5060 Ti": {"gpu": "9.0%", "mem": "28.4%"}},
             "service": {"uptime": 48231},
         }
+
+    def _seed_demo_events(self) -> None:
+        """Populate a few fake events when running with --demo.
+
+        This makes the Events tab immediately useful for UI testing (time column,
+        labels, snapshots icons, modal, etc.) without needing a real Frigate.
+        The start_times are chosen so that toLocaleTimeString() in most locales
+        will show a mix that exercises AM/PM formatting in 12h regions.
+        """
+        if not self.demo or self.recent_events:
+            return
+
+        import time
+
+        now = time.time()
+        # Recent events with varied times (will format according to browser/OS locale)
+        samples = [
+            FrigateEvent(
+                id="demo-evt-1",
+                camera="driveway",
+                label="person",
+                start_time=now - 420,   # ~7 min ago
+                end_time=now - 412,
+                top_score=0.94,
+                has_snapshot=True,
+                has_clip=True,
+                zones=["front_yard"],
+                sub_label=None,
+                average_estimated_speed=2.3,
+            ),
+            FrigateEvent(
+                id="demo-evt-2",
+                camera="backdeck",
+                label="car",
+                start_time=now - 95,
+                end_time=now - 88,
+                top_score=0.87,
+                has_snapshot=True,
+                has_clip=False,
+                zones=["driveway", "side"],
+                sub_label="suv",
+                average_estimated_speed=15.0,
+            ),
+            FrigateEvent(
+                id="demo-evt-3",
+                camera="fronthouse",
+                label="dog",
+                start_time=now - 15,
+                end_time=now - 5,
+                top_score=0.71,
+                has_snapshot=False,
+                has_clip=False,
+                zones=["porch"],
+                sub_label=None,
+                average_estimated_speed=None,
+            ),
+        ]
+        self.recent_events = sorted(samples, key=lambda x: x.start_time, reverse=True)
+        self._notify("events", self.recent_events)
+        self.add_log("Seeded 3 demo events (for Events tab testing)", "info")
