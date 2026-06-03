@@ -13,6 +13,7 @@ The goal is "exact same features" with zero duplication of the complex update lo
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Callable, Awaitable
@@ -57,7 +58,7 @@ class FrigateMonitorCore:
         s = settings or {}
         self.frigate_url: str = str(s.get("frigate_url", "http://localhost:5000")).rstrip("/")
         self.poll_interval: float = float(s.get("poll_interval", 1.0))
-        self.stats_log_interval: float = float(s.get("stats_log_interval", 10.0))
+        self.stats_log_interval: float = float(s.get("stats_log_interval", 600.0))
         self.max_events: int = int(s.get("max_events", 150))
         self.demo: bool = bool(s.get("demo", False))
 
@@ -95,6 +96,12 @@ class FrigateMonitorCore:
         # Activity log buffer (replay for late web clients + diagnostics)
         self.log_entries: list[dict[str, Any]] = []  # [{"ts": "HH:MM:SS", "level": "...", "message": "..."}]
         self._max_log_entries: int = 300
+
+        # History for web histograms / time series (global + per-camera)
+        # Keep last ~10 minutes of 1s samples (600 points)
+        self._max_history: int = 600
+        self.health_history: list[dict[str, Any]] = []
+        self.cameras_history: list[dict[str, Any]] = []  # each entry: {'timestamp': , 'cameras': list of dicts}
 
         # Listeners (TUI renderers + web SSE broadcaster)
         self._listeners: list[Callable[[str, Any], None | Awaitable[None]]] = []
@@ -187,6 +194,8 @@ class FrigateMonitorCore:
             "summary": summary,
             "demo": self.demo,
             "max_events": self.max_events,
+            "health_history": self.health_history[-300:],  # ~5 min for charts
+            "cameras_history": self.cameras_history[-300:],
         }
 
     # ------------------------------------------------------------------
@@ -355,6 +364,32 @@ class FrigateMonitorCore:
         if stats:
             self.cameras = parse_cameras(stats)
             self.health = compute_health(stats)
+
+            # Record history for web charts/histograms
+            ts = time.time()
+            self.health_history.append({
+                'timestamp': ts,
+                'pressure_pct': self.health.pressure_pct,
+                'detection_pressure': self.health.detection_pressure,
+                'skipped_fps': self.health.skipped_fps,
+                'detection_fps': self.health.detection_fps,
+            })
+            self.cameras_history.append({
+                'timestamp': ts,
+                'cameras': [
+                    {
+                        'name': c.name,
+                        'detection_fps': c.detection_fps,
+                        'skipped_fps': c.skipped_fps,
+                        'camera_fps': c.camera_fps,
+                    }
+                    for c in self.cameras
+                ],
+            })
+            if len(self.health_history) > self._max_history:
+                self.health_history = self.health_history[-self._max_history:]
+            if len(self.cameras_history) > self._max_history:
+                self.cameras_history = self.cameras_history[-self._max_history:]
 
             if not self._cameras_logged:
                 if self.cameras:

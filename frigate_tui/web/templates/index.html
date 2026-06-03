@@ -6,6 +6,8 @@
   <title>Frigate TUI — Web</title>
   <!-- Tailwind Play CDN: zero-build, perfect for a self-contained local dashboard -->
   <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Chart.js for fancy histograms / time series in Health tab -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     :root {
       --bg: #0f1117;
@@ -76,9 +78,9 @@
   <!-- Global Summary Strip (matches TUI) -->
   <div class="px-4 py-2 panel mx-3 mt-3 flex items-center gap-x-8 text-sm">
     <div><span class="text-[#6b7280] font-semibold">FRIGATE</span> <span id="sum-frigate" class="metric-value good">{{ snapshot.frigate_version or '—' }}</span></div>
-    <div><span class="text-[#6b7280] font-semibold">DETECTION</span> <span id="sum-detection" class="metric-value">{{ (snapshot.summary.detection_fps or 0)|round(1) }}</span></div>
+    <div class="flex items-center gap-1"><span class="text-[#6b7280] font-semibold">DETECTION</span> <span id="sum-detection" class="metric-value">{{ (snapshot.summary.detection_fps or 0)|round(1) }}</span><canvas id="spark-detection" width="55" height="16" class="ml-1"></canvas></div>
     <div><span class="text-[#6b7280] font-semibold">GPU</span> <span id="sum-gpu" class="metric-value">{{ snapshot.summary.gpu or '—' }}</span></div>
-    <div><span class="text-[#6b7280] font-semibold">SKIPPED</span> <span id="sum-skipped" class="metric-value">{{ (snapshot.summary.skipped_fps or 0)|round(1) }}</span></div>
+    <div class="flex items-center gap-1"><span class="text-[#6b7280] font-semibold">SKIPPED</span> <span id="sum-skipped" class="metric-value">{{ (snapshot.summary.skipped_fps or 0)|round(1) }}</span><canvas id="spark-skipped" width="55" height="16" class="ml-1"></canvas></div>
     <div class="ml-auto text-[10px] text-[#6b7280]">Live via core • SSE • identical logic to TUI</div>
   </div>
 
@@ -143,12 +145,40 @@
         </div>
 
         <!-- Health -->
-        <div id="pane-health" class="hidden">
-          <div id="health-pressure" class="metric-value text-lg mb-3"></div>
-          <div id="health-skipped" class="text-sm text-[#6b7280]"></div>
-          <div class="mt-4 text-xs text-[#6b7280]">
-            Pressure = expected camera fps − actual detection fps.<br>
-            High pressure + skipped frames = pipeline backup (the core signal the TUI was built to surface).
+        <div id="pane-health" class="hidden flex-1 flex flex-col overflow-hidden">
+          <div id="health-pressure" class="metric-value text-base mb-1 flex-shrink-0"></div>
+          <div id="health-skipped" class="text-xs text-[#6b7280] mb-2 flex-shrink-0"></div>
+
+          <!-- Global section - time series gets more space -->
+          <div class="flex-[2] flex flex-col min-h-0">
+            <div class="text-xs font-semibold mb-0.5 text-[#a5b4fc] flex-shrink-0">Global Pressure (time series)</div>
+            <div class="flex-1 min-h-[40px]">
+              <canvas id="global-pressure-chart" style="width: 100%; height: 100%;"></canvas>
+            </div>
+          </div>
+          <div class="flex-1 flex flex-col min-h-0 mt-1">
+            <div class="text-xs font-semibold mb-0.5 text-[#a5b4fc] flex-shrink-0">Global Pressure (distribution / histogram)</div>
+            <div class="flex-1 min-h-[30px]">
+              <canvas id="global-pressure-hist" style="width: 100%; height: 100%;"></canvas>
+            </div>
+          </div>
+
+          <!-- Per-camera section -->
+          <div class="flex-[3] flex flex-col min-h-0 mt-2">
+            <div class="text-xs font-semibold mb-0.5 text-[#a5b4fc] flex-shrink-0">Per-Camera Detection FPS (time series)</div>
+            <div class="flex-1 min-h-[50px]">
+              <canvas id="camera-fps-chart" style="width: 100%; height: 100%;"></canvas>
+            </div>
+          </div>
+          <div class="flex-1 flex flex-col min-h-0 mt-1">
+            <div class="text-xs font-semibold mb-0.5 text-[#a5b4fc] flex-shrink-0">Per-Camera Avg Skipped (over history)</div>
+            <div class="flex-1 min-h-[30px]">
+              <canvas id="camera-skipped-avg" style="width: 100%; height: 100%;"></canvas>
+            </div>
+          </div>
+
+          <div class="mt-2 text-xs text-[#6b7280] flex-shrink-0">
+            Pressure = expected − actual. Charts auto-size to available container space.
           </div>
         </div>
       </div>
@@ -193,6 +223,23 @@
     let currentTab = 'overview';
     let es = null; // EventSource
 
+    // History buffers for charts (populated from snapshot + live SSE)
+    let healthHistory = [];   // [{timestamp, pressure_pct, ...}]
+    let camerasHistory = [];  // [{timestamp, cameras: [...] }]
+
+    // Sparkline history (for top summary bar)
+    let detectionHistory = [];
+    let skippedHistory = [];
+    const MAX_SPARK_POINTS = 60;
+    let sparkDetectionChart = null;
+    let sparkSkippedChart = null;
+
+    // Chart.js instances
+    let globalPressureChart = null;
+    let globalHistChart = null;
+    let cameraFpsChart = null;
+    let cameraSkippedAvgChart = null;
+
     function switchTab(name) {
       document.querySelectorAll('[id^="pane-"]').forEach(el => el.classList.add('hidden'));
       document.querySelectorAll('[id^="tab-"]').forEach(el => el.classList.remove('active'));
@@ -208,6 +255,18 @@
       }
       if (name === 'events' && window.__lastEvents) {
         renderEvents(window.__lastEvents, true);
+      }
+
+      // Lazy init health charts when tab shown (so container has size)
+      if (name === 'health') {
+        if (!globalPressureChart && (healthHistory.length > 0 || camerasHistory.length > 0)) {
+          initHealthCharts(healthHistory, camerasHistory);
+        } else if (globalPressureChart) {
+          globalPressureChart.resize();
+          globalHistChart && globalHistChart.resize();
+          cameraFpsChart && cameraFpsChart.resize();
+          cameraSkippedAvgChart && cameraSkippedAvgChart.resize();
+        }
       }
     }
 
@@ -352,6 +411,323 @@
                     `Pipeline healthy: <span class="${h.is_healthy ? 'good' : 'bad'}">${h.is_healthy}</span>`;
     }
 
+    // --- Health histograms / time series using Chart.js ---
+    function computeHistogram(values, numBins = 8) {
+      if (!values || values.length === 0) return { labels: [], data: [] };
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      if (max === min) return { labels: [min.toFixed(1)], data: [values.length] };
+      const binSize = (max - min) / numBins;
+      const bins = new Array(numBins).fill(0);
+      values.forEach(v => {
+        let idx = Math.floor((v - min) / binSize);
+        if (idx >= numBins) idx = numBins - 1;
+        bins[idx]++;
+      });
+      const labels = bins.map((_, i) => {
+        const start = (min + i * binSize).toFixed(1);
+        const end = (min + (i + 1) * binSize).toFixed(1);
+        return `${start}-${end}`;
+      });
+      return { labels, data: bins };
+    }
+
+    function computeCameraAvgs(camHist) {
+      if (!camHist || camHist.length === 0) return { labels: [], data: [] };
+      const byCam = {};
+      camHist.forEach(entry => {
+        (entry.cameras || []).forEach(c => {
+          if (!byCam[c.name]) byCam[c.name] = [];
+          byCam[c.name].push(c.skipped_fps || 0);
+        });
+      });
+      const labels = Object.keys(byCam).sort();
+      const avgs = labels.map(name => {
+        const vals = byCam[name];
+        return vals.reduce((a, b) => a + b, 0) / vals.length;
+      });
+      return { labels, data: avgs };
+    }
+
+    function initHealthCharts(healthHist, camHist) {
+      healthHistory = (healthHist || []).slice();
+      camerasHistory = (camHist || []).slice();
+
+      // Destroy existing
+      [globalPressureChart, globalHistChart, cameraFpsChart, cameraSkippedAvgChart].forEach(ch => {
+        if (ch) ch.destroy();
+      });
+
+      // 1. Global pressure time series (line)
+      const tsLabels = healthHistory.map((_, i) => i);
+      const pressureVals = healthHistory.map(h => (h.pressure_pct || 0) * 100);
+      const ctx1 = document.getElementById('global-pressure-chart');
+      if (ctx1) {
+        globalPressureChart = new Chart(ctx1, {
+          type: 'line',
+          data: {
+            labels: tsLabels,
+            datasets: [{
+              label: 'Pressure %',
+              data: pressureVals,
+              borderColor: '#eab308',
+              borderWidth: 1.5,
+              fill: false,
+              tension: 0.2,
+              pointRadius: 0,
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+              x: { display: false },
+              y: { min: 0, max: 100, ticks: { stepSize: 25 } }
+            },
+            plugins: { legend: { display: false } }
+          }
+        });
+      }
+
+      // 2. Global pressure histogram (bar)
+      const hist = computeHistogram(pressureVals, 8);
+      const ctx2 = document.getElementById('global-pressure-hist');
+      if (ctx2) {
+        globalHistChart = new Chart(ctx2, {
+          type: 'bar',
+          data: {
+            labels: hist.labels,
+            datasets: [{
+              label: 'Count',
+              data: hist.data,
+              backgroundColor: '#4b5563',
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: { x: { ticks: { font: { size: 9 } } }, y: { display: false } },
+            plugins: { legend: { display: false } }
+          }
+        });
+      }
+
+      // 3. Per-camera FPS time series (multi-line)
+      // Use last 120 points for clarity
+      const recentCamHist = camerasHistory.slice(-120);
+      const camTsLabels = recentCamHist.map((_, i) => i);
+      const camNames = new Set();
+      recentCamHist.forEach(e => (e.cameras || []).forEach(c => camNames.add(c.name)));
+      const sortedCamNames = Array.from(camNames).sort();
+      const datasets = sortedCamNames.map((name, idx) => {
+        const color = ['#22c55e', '#eab308', '#ef4444', '#3b82f6', '#a855f7'][idx % 5];
+        const data = recentCamHist.map(entry => {
+          const cam = (entry.cameras || []).find(c => c.name === name);
+          return cam ? cam.detection_fps : null;
+        });
+        return {
+          label: name,
+          data: data,
+          borderColor: color,
+          borderWidth: 1,
+          fill: false,
+          tension: 0.1,
+          pointRadius: 0,
+        };
+      });
+      const ctx3 = document.getElementById('camera-fps-chart');
+      if (ctx3) {
+        cameraFpsChart = new Chart(ctx3, {
+          type: 'line',
+          data: { labels: camTsLabels, datasets },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: { x: { display: false }, y: { min: 0 } },
+            plugins: { legend: { position: 'top', labels: { boxWidth: 8, font: { size: 9 } } } }
+          }
+        });
+      }
+
+      // 4. Per-camera average skipped (bar)
+      const avgData = computeCameraAvgs(camerasHistory);
+      const ctx4 = document.getElementById('camera-skipped-avg');
+      if (ctx4) {
+        cameraSkippedAvgChart = new Chart(ctx4, {
+          type: 'bar',
+          data: {
+            labels: avgData.labels,
+            datasets: [{
+              label: 'Avg Skipped',
+              data: avgData.data,
+              backgroundColor: '#f87171',
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: { y: { min: 0 } },
+            plugins: { legend: { display: false } }
+          }
+        });
+      }
+    }
+
+    function updateGlobalCharts() {
+      if (!healthHistory.length) return;
+
+      const recent = healthHistory.slice(-120);
+      const pressureVals = recent.map(h => (h.pressure_pct || 0) * 100);
+
+      if (globalPressureChart) {
+        globalPressureChart.data.labels = recent.map((_, i) => i);
+        globalPressureChart.data.datasets[0].data = pressureVals;
+        globalPressureChart.update('none');
+      }
+
+      if (globalHistChart) {
+        const hist = computeHistogram(pressureVals, 8);
+        globalHistChart.data.labels = hist.labels;
+        globalHistChart.data.datasets[0].data = hist.data;
+        globalHistChart.update('none');
+      }
+    }
+
+    function updateCameraCharts() {
+      if (!camerasHistory.length) return;
+
+      const recent = camerasHistory.slice(-120);
+      const labels = recent.map((_, i) => i);
+
+      const camNames = new Set();
+      recent.forEach(e => (e.cameras || []).forEach(c => camNames.add(c.name)));
+      const sorted = Array.from(camNames).sort();
+
+      if (cameraFpsChart) {
+        cameraFpsChart.data.labels = labels;
+
+        // Update in place on existing dataset objects (and only reassign .datasets for add/remove).
+        // This is key for smooth scrolling updates instead of the chart "growing again" or resetting
+        // on every live data point (as if first time running).
+        const currentDs = cameraFpsChart.data.datasets || [];
+        const dsByLabel = {};
+        currentDs.forEach(ds => { if (ds && ds.label) dsByLabel[ds.label] = ds; });
+
+        sorted.forEach((name, idx) => {
+          let ds = dsByLabel[name];
+          const data = recent.map(entry => {
+            const cam = (entry.cameras || []).find(c => c.name === name);
+            return cam ? cam.detection_fps : null;
+          });
+
+          if (ds) {
+            ds.data = data;  // update data array on the live dataset object
+            delete dsByLabel[name];
+          } else {
+            const color = ['#22c55e', '#eab308', '#ef4444', '#3b82f6', '#a855f7'][idx % 5];
+            ds = {
+              label: name,
+              data: data,
+              borderColor: color,
+              borderWidth: 1,
+              fill: false,
+              tension: 0.1,
+              pointRadius: 0
+            };
+            currentDs.push(ds);
+          }
+        });
+
+        // Remove any datasets whose cameras are no longer present in recent data
+        cameraFpsChart.data.datasets = currentDs.filter(ds => ds && ds.label && sorted.includes(ds.label));
+
+        cameraFpsChart.update('none');
+      }
+
+      if (cameraSkippedAvgChart) {
+        const avgData = computeCameraAvgs(recent);
+        cameraSkippedAvgChart.data.labels = avgData.labels;
+        cameraSkippedAvgChart.data.datasets[0].data = avgData.data;
+        cameraSkippedAvgChart.update('none');
+      }
+    }
+
+    function initSparklines() {
+      const detCtx = document.getElementById('spark-detection');
+      if (detCtx && !sparkDetectionChart) {
+        sparkDetectionChart = new Chart(detCtx, {
+          type: 'line',
+          data: {
+            labels: detectionHistory.map((_, i) => i),
+            datasets: [{
+              data: detectionHistory,
+              borderColor: '#22c55e',
+              borderWidth: 1.5,
+              fill: false,
+              pointRadius: 0,
+              tension: 0.3
+            }]
+          },
+          options: {
+            responsive: false,
+            maintainAspectRatio: false,
+            scales: {
+              x: { display: false, grid: { display: false } },
+              y: { display: false, grid: { display: false } }
+            },
+            plugins: { legend: { display: false }, tooltip: { enabled: false } },
+            elements: { line: { borderWidth: 1.5 }, point: { radius: 0 } }
+          }
+        });
+      }
+
+      const skCtx = document.getElementById('spark-skipped');
+      if (skCtx && !sparkSkippedChart) {
+        sparkSkippedChart = new Chart(skCtx, {
+          type: 'line',
+          data: {
+            labels: skippedHistory.map((_, i) => i),
+            datasets: [{
+              data: skippedHistory,
+              borderColor: '#f87171',
+              borderWidth: 1.5,
+              fill: false,
+              pointRadius: 0,
+              tension: 0.3
+            }]
+          },
+          options: {
+            responsive: false,
+            maintainAspectRatio: false,
+            scales: {
+              x: { display: false, grid: { display: false } },
+              y: { display: false, grid: { display: false } }
+            },
+            plugins: { legend: { display: false }, tooltip: { enabled: false } },
+            elements: { line: { borderWidth: 1.5 }, point: { radius: 0 } }
+          }
+        });
+      }
+    }
+
+    function pushToSparks(det, sk) {
+      detectionHistory.push(det);
+      if (detectionHistory.length > MAX_SPARK_POINTS) detectionHistory.shift();
+      skippedHistory.push(sk);
+      if (skippedHistory.length > MAX_SPARK_POINTS) skippedHistory.shift();
+
+      if (sparkDetectionChart) {
+        sparkDetectionChart.data.labels = detectionHistory.map((_, i) => i);
+        sparkDetectionChart.data.datasets[0].data = detectionHistory;
+        sparkDetectionChart.update('none');
+      }
+      if (sparkSkippedChart) {
+        sparkSkippedChart.data.labels = skippedHistory.map((_, i) => i);
+        sparkSkippedChart.data.datasets[0].data = skippedHistory;
+        sparkSkippedChart.update('none');
+      }
+    }
+
     function updateConnection(conn) {
       const bar = document.getElementById('conn-status');
       if (!bar || !conn) return;
@@ -416,6 +792,25 @@
 
       // Health
       renderHealth(snap.health);
+
+      // Seed history from snapshot for later lazy chart init + sparklines
+      if (snap.health_history && snap.health_history.length > 0) {
+        healthHistory = snap.health_history.slice();
+        camerasHistory = (snap.cameras_history || []).slice();
+      }
+
+      // Seed sparkline history from health_history if present (for initial top bar sparklines)
+      if (snap.health_history && snap.health_history.length > 0) {
+        const recent = snap.health_history.slice(-MAX_SPARK_POINTS);
+        detectionHistory = recent.map(h => h.detection_fps || 0);
+        skippedHistory = recent.map(h => h.skipped_fps || 0);
+      } else if (snap.summary) {
+        const det = snap.summary.detection_fps || 0;
+        const sk = snap.summary.skipped_fps || 0;
+        detectionHistory = [det];
+        skippedHistory = [sk];
+      }
+      initSparklines();
 
       // Connection
       updateConnection(snap.connection || {ok: true, url: snap.frigate_url});
@@ -484,13 +879,39 @@
               const g = document.getElementById('sum-gpu');
               if (g) g.textContent = Object.values(gpus)[0].gpu || '—';
             }
+
+            pushToSparks(det, sk);
           }
           break;
         case 'cameras':
           renderCameras(data || []);
+          if (data && data.length) {
+            camerasHistory.push({
+              timestamp: Date.now() / 1000,
+              cameras: data.map(c => ({
+                name: c.name,
+                detection_fps: c.detection_fps || 0,
+                skipped_fps: c.skipped_fps || 0,
+                camera_fps: c.camera_fps || 0,
+              })),
+            });
+            if (camerasHistory.length > 600) camerasHistory.shift();
+            updateCameraCharts();
+          }
           break;
         case 'health':
           renderHealth(data);
+          if (data) {
+            healthHistory.push({
+              timestamp: Date.now() / 1000,
+              pressure_pct: data.pressure_pct || 0,
+              detection_pressure: data.detection_pressure || 0,
+              skipped_fps: data.skipped_fps || 0,
+              detection_fps: data.detection_fps || 0,
+            });
+            if (healthHistory.length > 600) healthHistory.shift();
+            updateGlobalCharts();
+          }
           break;
         case 'events':
           // Authoritative list from core (newest first)
