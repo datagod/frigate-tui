@@ -374,7 +374,7 @@
       const ts = new Date((ev.start_time || 0) * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
       const dur = ev.duration_s ? ev.duration_s.toFixed(1) + 's' : '—';
       const score = ev.top_score != null ? ev.top_score.toFixed(2) : '—';
-      const speed = ev.average_estimated_speed != null ? ev.average_estimated_speed.toFixed(1) : '—';
+      const speed = (ev.average_estimated_speed != null && ev.average_estimated_speed !== 0) ? ev.average_estimated_speed.toFixed(1) : '—';
       const clip = ev.has_clip ? '📼' : '';
       const snap = ev.has_snapshot ? '📷' : '';
 
@@ -955,7 +955,7 @@
       body.innerHTML = `
         <div>Score: ${ev.top_score != null ? ev.top_score.toFixed(2) : '—'} &nbsp; Duration: ${ev.duration_s ? ev.duration_s.toFixed(1)+'s' : '—'}</div>
         <div>Zones: ${(ev.zones||[]).join(', ') || '—'}</div>
-        <div>Speed: ${ev.average_estimated_speed != null ? ev.average_estimated_speed.toFixed(1) : '—'} ${ev.velocity_angle != null ? ' @ ' + ev.velocity_angle.toFixed(0) + '°' : ''}</div>
+        <div>Speed: ${ev.average_estimated_speed != null && ev.average_estimated_speed !== 0 ? ev.average_estimated_speed.toFixed(1) : '—'} ${ev.velocity_angle != null ? ' @ ' + ev.velocity_angle.toFixed(0) + '°' : ''}</div>
       `;
 
       media.innerHTML = '';
