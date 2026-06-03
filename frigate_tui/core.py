@@ -715,14 +715,33 @@ class FrigateMonitorCore:
                         continue
 
         except Exception as e:
-            self.add_log(f"MQTT listener error: {e}", "error")
+            err = str(e)
+            is_dns_error = (
+                "Name or service not known" in err
+                or "getaddrinfo" in err.lower()
+                or getattr(e, "errno", None) in (-2, -3)
+            )
+
+            if is_dns_error:
+                host = (self.mqtt_config or {}).get("host", "mqtt")
+                self.add_log(
+                    f"MQTT host '{host}' could not be resolved (DNS error). "
+                    "This is common if 'mqtt' is only valid inside the Frigate Docker network. "
+                    "Falling back to HTTP polling for events.",
+                    "warning",
+                )
+            else:
+                self.add_log(f"MQTT listener error: {err}", "error")
+
             if not getattr(self, "_event_polling_active", False):
                 ev_int = max(2.0, self.poll_interval * 2)
                 self._tasks.append(
                     asyncio.create_task(self._interval_loop("events", ev_int, self._refresh_events))
                 )
                 self._event_polling_active = True
-                self.add_log("MQTT failed — falling back to event polling", "warning")
+                if not is_dns_error:
+                    # For other errors, keep the original short fallback notice
+                    self.add_log("MQTT failed — falling back to event polling", "warning")
 
     # ------------------------------------------------------------------
     # Demo data (identical to original TUI)
