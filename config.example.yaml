@@ -3,7 +3,7 @@
 
 frigate_url: "http://localhost:5000"   # or http://your-frigate-host:5000
 poll_interval: 1.0                     # seconds between /api/stats refreshes (and rendering)
-stats_log_interval: 10.0               # seconds between "Stats OK" messages in the Activity Log (errors always log immediately)
+stats_log_interval: 600.0              # seconds between "Stats OK" messages in the Activity Log (errors always log immediately). Default is 10 minutes.
 max_events: 150                        # how many events to keep in the live table
 
 # Optional auth (only needed if your Frigate requires login and you are not on a trusted host)

@@ -206,9 +206,12 @@ Priority (highest wins):
 1. CLI flags (`--url`, `--interval`)
 2. Environment variables (`FRIGATE_TUI_URL`, `FRIGATE_TUI_INTERVAL`, …)
 3. `~/.config/frigate-tui/config.yaml` or local `./config.yaml`
-4. Built-in defaults (`http://localhost:5000`, 1.0s interval)
+4. Built-in defaults (`http://localhost:5000`, 1.0s poll interval, 600s / 10min for "Stats OK" messages)
 
 See `config.example.yaml` for the full schema.
+
+Notable config options include:
+- `stats_log_interval`: seconds between "Stats OK" messages in the Activity Log (default: 600 / 10 minutes). Errors are always logged immediately.
 
 ### Real-time Events via MQTT (Recommended)
 
