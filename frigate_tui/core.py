@@ -84,6 +84,9 @@ class FrigateMonitorCore:
         self._cameras_logged: bool = False
         self._logged_connected: bool = False
 
+        # For de-duping review logs (same review id shouldn't spam the activity log)
+        self._logged_review_ids: set[str] = set()
+
         # Canonical live state (source of truth for TUI + web)
         self.last_stats: dict[str, Any] | None = None
         self.recent_events: list[FrigateEvent] = []
@@ -396,7 +399,7 @@ class FrigateMonitorCore:
             if not self._cameras_logged:
                 if self.cameras:
                     self.add_log(
-                        f"Parsed {len(self.cameras)} cameras from stats: {[c.name for c in self.cameras]}",
+                        f"Parsed {len(self.cameras)} cameras from stats",
                         "info",
                     )
                 else:
@@ -533,6 +536,13 @@ class FrigateMonitorCore:
                 start = rev.start_time
                 if self._last_review_ts and start <= self._last_review_ts:
                     continue
+                # Also de-dupe by review id so the exact same review never spams the log
+                # even if the time-based guard is bypassed for some reason (multiple polls, etc.)
+                if rev.id and rev.id in self._logged_review_ids:
+                    if start > (self._last_review_ts or 0):
+                        self._last_review_ts = start
+                    continue
+
                 if rev.severity == "alert" or rev.sub_labels:
                     msg = f"Review: {rev.severity.upper()} on {rev.camera}"
                     if rev.sub_labels:
@@ -540,6 +550,9 @@ class FrigateMonitorCore:
                     elif rev.objects:
                         msg += f" — {', '.join(rev.objects)}"
                     self.add_log(msg, "warning" if rev.severity == "alert" else "info")
+                    if rev.id:
+                        self._logged_review_ids.add(rev.id)
+
                 if start > (self._last_review_ts or 0):
                     self._last_review_ts = start
         except Exception as e:
