@@ -129,7 +129,7 @@
             <table class="data-table w-full text-xs border-collapse" id="events-table">
               <thead>
                 <tr class="text-left text-[#6b7280] border-b border-[#4a5263]">
-                  <th class="w-16">Time</th>
+                  <th class="w-24 min-w-24">Time</th>
                   <th class="w-28">Camera</th>
                   <th>Label</th>
                   <th class="w-14">Speed</th>
@@ -381,7 +381,7 @@
       const labelHtml = `<span style="color:${ev.color || '#c0c5d1'}">${ev.display_label || ev.label}</span>`;
 
       tr.innerHTML = `
-        <td class="font-mono text-[#6b7280]">${ts}</td>
+        <td class="font-mono text-[#6b7280] whitespace-nowrap min-w-24">${ts}</td>
         <td>${ev.camera}</td>
         <td>${labelHtml}</td>
         <td class="font-mono">${speed}</td>
