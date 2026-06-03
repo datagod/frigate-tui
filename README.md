@@ -6,7 +6,7 @@ Both the TUI and the optional web UI share the exact same core logic (`FrigateMo
 
 Watch camera FPS, detector queues / pressure, GPU usage, incoming events, and system health directly from your terminal (or tmux), or in a browser over your local network.
 
-![screenshot placeholder](https://via.placeholder.com/800x400/1a1a2e/00d4ff?text=Frigate+TUI+Screenshot)
+![screenshot placeholder](screenshot.jpg)
 
 ## Features
 
