@@ -62,6 +62,7 @@ class FrigateMonitorCore:
         self.timeline_interval: float = float(s.get("timeline_interval", 5.0))
         self.stats_log_interval: float = float(s.get("stats_log_interval", 600.0))
         self.max_events: int = int(s.get("max_events", 150))
+        self.tui_version = __version__
         self.demo: bool = bool(s.get("demo", False))
 
         # MQTT (optional)
