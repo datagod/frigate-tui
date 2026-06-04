@@ -315,8 +315,6 @@ class FrigateMonitor(App[None]):
                             id="overview-welcome"
                         )
                         yield Static("", id="overview-status", classes="text-xs text-[#6b7280] mt-2")
-                            id="overview-text",
-                        )
 
                     with TabPane("Cameras", id="cameras"):
                         yield VerticalScroll(id="cameras-scroll")
@@ -730,6 +728,8 @@ class FrigateMonitor(App[None]):
             # Populate the Events table with everything we have so far
             # (important when events arrived via MQTT while user was on another tab)
             self._render_events_table()
+        elif event.pane.id == "overview":
+            self._update_overview_status()
 
 
 if __name__ == "__main__":

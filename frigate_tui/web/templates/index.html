@@ -105,7 +105,7 @@
       <div class="panel flex-1 overflow-auto p-3" id="tab-content">
         <!-- Overview -->
         <div id="pane-overview">
-          <div class="text-[#a5b4fc] font-semibold mb-2">Welcome to Frigate TUI (Web)</div>
+          <div class="text-[#a5b4fc] font-semibold mb-2">Welcome to Frigate TUI (Web) v{{ snapshot.tui_version or '0.1' }}</div>
 
           <!-- Live system info -->
           <div class="mb-4 p-3 bg-[#161b26] border border-[#4a5263] rounded text-sm">
@@ -937,8 +937,9 @@
           }
           break;
         case 'cameras':
+          window.__lastSnap = { ...(window.__lastSnap || {}), cameras: data || [] };
           renderCameras(data || []);
-          updateOverview(window.__lastSnap || {}); // refresh overview counts etc.
+          updateOverview(window.__lastSnap);
           if (data && data.length) {
             camerasHistory.push({
               timestamp: Date.now() / 1000,
@@ -954,8 +955,9 @@
           }
           break;
         case 'health':
+          window.__lastSnap = { ...(window.__lastSnap || {}), health: data };
           renderHealth(data);
-          updateOverview(window.__lastSnap || {});
+          updateOverview(window.__lastSnap);
           if (data) {
             healthHistory.push({
               timestamp: Date.now() / 1000,
@@ -970,20 +972,26 @@
           break;
         case 'events':
           // Authoritative list from core (newest first)
+          window.__lastSnap = { ...(window.__lastSnap || {}), recent_events: data || [] };
           renderEvents(data || [], true);
-          updateOverview(window.__lastSnap || {});
+          updateOverview(window.__lastSnap);
           break;
         case 'connection':
+          window.__lastSnap = { ...(window.__lastSnap || {}), connection: data };
           updateConnection(data);
-          updateOverview(window.__lastSnap || {});
+          updateOverview(window.__lastSnap);
           break;
         case 'poll_interval':
+          window.__lastSnap = { ...(window.__lastSnap || {}), poll_interval: data };
           const pollInputLive = document.getElementById('poll-interval');
           if (pollInputLive && data != null) pollInputLive.value = data;
+          updateOverview(window.__lastSnap);
           break;
         case 'version':
+          window.__lastSnap = { ...(window.__lastSnap || {}), frigate_version: data };
           const v = document.getElementById('frigate-ver');
           if (v && data) v.textContent = data;
+          updateOverview(window.__lastSnap);
           break;
       }
     }
