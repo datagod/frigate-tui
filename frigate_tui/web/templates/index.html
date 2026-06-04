@@ -65,7 +65,7 @@
       {% if demo %}
       <span class="px-2 py-0.5 text-[10px] rounded bg-yellow-500/20 text-yellow-400 border border-yellow-500/40">DEMO MODE</span>
       {% endif %}
-      <div class="text-[#6b7280] text-xs">v0.1 • <span id="frigate-ver">{{ snapshot.frigate_version or '?' }}</span></div>
+      <div class="text-[#6b7280] text-xs">tui <span id="tui-ver">{{ snapshot.tui_version or '0.1' }}</span> • frigate <span id="frigate-ver">{{ snapshot.frigate_version or '?' }}</span></div>
     </div>
     <div class="flex items-center gap-2">
       <button onclick="doRefresh()" class="px-3 py-1 rounded bg-[#272e3b] hover:bg-[#3a4255] active:bg-[#4a5263] text-xs">r — Refresh</button>
@@ -106,6 +106,25 @@
         <!-- Overview -->
         <div id="pane-overview">
           <div class="text-[#a5b4fc] font-semibold mb-2">Welcome to Frigate TUI (Web)</div>
+
+          <!-- Live system info -->
+          <div class="mb-4 p-3 bg-[#161b26] border border-[#4a5263] rounded text-sm">
+            <div class="font-semibold text-[#c0c5d1] mb-1">Current Status</div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1 text-xs">
+              <div><span class="text-[#6b7280]">frigate-tui:</span> <span id="ov-tui-ver" class="font-mono text-[#a5b4fc]"></span></div>
+              <div><span class="text-[#6b7280]">Frigate:</span> <span id="ov-frigate-ver" class="font-mono"></span> @ <span id="ov-url" class="text-[#c0c5d1]"></span></div>
+
+              <div><span class="text-[#6b7280]">Poll interval:</span> <span id="ov-poll" class="font-mono"></span>s</div>
+              <div><span class="text-[#6b7280]">Demo mode:</span> <span id="ov-demo" class="font-mono"></span></div>
+
+              <div><span class="text-[#6b7280]">Cameras:</span> <span id="ov-cam-count" class="font-mono"></span></div>
+              <div><span class="text-[#6b7280]">Health:</span> <span id="ov-health" class="font-mono"></span></div>
+
+              <div><span class="text-[#6b7280]">Events tracked:</span> <span id="ov-events" class="font-mono"></span></div>
+              <div><span class="text-[#6b7280]">Connection:</span> <span id="ov-conn" class="font-mono"></span></div>
+            </div>
+          </div>
+
           <div class="text-[#6b7280] leading-snug">
             This dashboard has <span class="text-white">exact feature parity</span> with the terminal UI because both
             are driven by the same <code class="text-amber-400">FrigateMonitorCore</code>.<br><br>
@@ -291,6 +310,33 @@
       }
       const v = document.getElementById('frigate-ver');
       if (v && snap.frigate_version) v.textContent = snap.frigate_version;
+      const tv = document.getElementById('tui-ver');
+      if (tv && snap.tui_version) tv.textContent = snap.tui_version;
+    }
+
+    function updateOverview(snap) {
+      if (!snap) return;
+      const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+
+      set('ov-tui-ver', snap.tui_version || '—');
+      set('ov-frigate-ver', snap.frigate_version || '—');
+      set('ov-url', snap.frigate_url || '—');
+      set('ov-poll', (snap.poll_interval != null ? snap.poll_interval : '—').toString());
+      set('ov-demo', snap.demo ? 'yes' : 'no');
+
+      const cams = snap.cameras || [];
+      set('ov-cam-count', cams.length);
+
+      const h = snap.health || {};
+      const p = (h.pressure_pct || 0) * 100;
+      const healthText = h.is_healthy ? 'healthy' : (p > 25 ? 'overloaded' : (p > 10 ? 'warning' : 'ok'));
+      set('ov-health', `${p.toFixed(0)}% pressure (${healthText})`);
+
+      const evs = snap.recent_events || [];
+      set('ov-events', `${evs.length} / ${snap.max_events || 150}`);
+
+      const conn = snap.connection || {};
+      set('ov-conn', conn.ok ? 'ok' : (conn.last_error || 'down'));
     }
 
     function renderCameras(cams) {
@@ -787,7 +833,9 @@
 
     function applySnapshot(snap) {
       if (!snap) return;
+      window.__lastSnap = snap;
       setSummary(snap);
+      updateOverview(snap);
 
       // Cameras
       renderCameras(snap.cameras || []);
@@ -890,6 +938,7 @@
           break;
         case 'cameras':
           renderCameras(data || []);
+          updateOverview(window.__lastSnap || {}); // refresh overview counts etc.
           if (data && data.length) {
             camerasHistory.push({
               timestamp: Date.now() / 1000,
@@ -906,6 +955,7 @@
           break;
         case 'health':
           renderHealth(data);
+          updateOverview(window.__lastSnap || {});
           if (data) {
             healthHistory.push({
               timestamp: Date.now() / 1000,
@@ -921,9 +971,11 @@
         case 'events':
           // Authoritative list from core (newest first)
           renderEvents(data || [], true);
+          updateOverview(window.__lastSnap || {});
           break;
         case 'connection':
           updateConnection(data);
+          updateOverview(window.__lastSnap || {});
           break;
         case 'poll_interval':
           const pollInputLive = document.getElementById('poll-interval');

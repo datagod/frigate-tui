@@ -312,6 +312,9 @@ class FrigateMonitor(App[None]):
                             "  2 / 3 / 4  Switch tabs\n"
                             "  c          Clear log\n\n"
                             "This is the best place to see connection attempts, errors, and polling results.",
+                            id="overview-welcome"
+                        )
+                        yield Static("", id="overview-status", classes="text-xs text-[#6b7280] mt-2")
                             id="overview-text",
                         )
 
@@ -359,6 +362,7 @@ class FrigateMonitor(App[None]):
             self.query_one("#poll-interval", Label).update(f"{self.core.poll_interval:.1f}s")
         except Exception:
             pass
+        self._update_overview_status()
 
         # Initial pump (core already did a stats refresh inside start, but ensure renders)
         self.call_after_refresh(self._render_cameras)
@@ -368,6 +372,23 @@ class FrigateMonitor(App[None]):
         try:
             ver = getattr(self.core, "_frigate_version", "?")
             self.query_one("#frigate-version", Label).update(ver)
+        except Exception:
+            pass
+
+    def _update_overview_status(self) -> None:
+        try:
+            status = self.query_one("#overview-status", Static)
+            core = self.core
+            tui_ver = getattr(core, "tui_version", None) or "0.1.0"
+            fr_ver = getattr(core, "_frigate_version", "?")
+            poll = getattr(core, "poll_interval", 1.0)
+            cams = len(getattr(core, "cameras", []))
+            h = getattr(core, "health", None)
+            health_str = f"{(h.pressure_pct*100):.0f}% pressure" if h else "—"
+            evs = len(getattr(core, "recent_events", []))
+            status.update(
+                f"frigate-tui v{tui_ver} • Frigate {fr_ver} • poll {poll:.1f}s • {cams} cams • {health_str} • {evs} events"
+            )
         except Exception:
             pass
 
@@ -393,13 +414,16 @@ class FrigateMonitor(App[None]):
             elif kind == "cameras":
                 self.cameras = payload or []
                 self.call_after_refresh(self._render_cameras)
+                self._update_overview_status()
             elif kind == "health":
                 self.health = payload
                 self._render_health()
+                self._update_overview_status()
             elif kind == "events":
                 self.recent_events = payload or []
                 # Full authoritative list from core — rebuild for correct order (matches old behavior)
                 self._render_events_table()
+                self._update_overview_status()
             elif kind == "log":
                 # Core already emitted the exact same message strings as the old TUI
                 if isinstance(payload, dict):
@@ -412,13 +436,16 @@ class FrigateMonitor(App[None]):
                     self.latency_ms = payload.get("latency_ms")
                     self.last_error = payload.get("last_error")
                 self._update_connection()
+                self._update_overview_status()
             elif kind == "version":
                 self._update_version_label()
+                self._update_overview_status()
             elif kind == "poll_interval":
                 try:
                     self.query_one("#poll-interval", Label).update(f"{float(payload):.1f}s")
                 except Exception:
                     pass
+                self._update_overview_status()
         except Exception:
             # Never let a listener break the TUI
             pass

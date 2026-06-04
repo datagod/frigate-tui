@@ -206,6 +206,7 @@ class FrigateMonitorCore:
             "demo": self.demo,
             "max_events": self.max_events,
             "poll_interval": self.poll_interval,
+            "tui_version": __version__,
             "health_history": self.health_history[-300:],  # ~5 min for charts
             "cameras_history": self.cameras_history[-300:],
         }
