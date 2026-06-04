@@ -87,6 +87,9 @@ class FrigateMonitorCore:
         # For de-duping review logs (same review id shouldn't spam the activity log)
         self._logged_review_ids: set[str] = set()
 
+        # Track event ids for which we've already logged an LLM/GenAI description
+        self._logged_llm_descriptions: set[str] = set()
+
         # Canonical live state (source of truth for TUI + web)
         self.last_stats: dict[str, Any] | None = None
         self.recent_events: list[FrigateEvent] = []
@@ -125,7 +128,7 @@ class FrigateMonitorCore:
           - "stats" -> raw stats dict | None
           - "cameras" -> list[CameraStats]
           - "health" -> SystemHealth | None
-          - "events" -> list[FrigateEvent]  (authoritative current list)
+          - "events" -> list[FrigateEvent]  (authoritative current list; events may include .description from Frigate GenAI/LLM)
           - "log" -> {"ts": str, "level": str, "message": str}
           - "connection" -> {"ok": bool, "latency_ms": int|None, "last_error": str|None, "url": str}
         """
@@ -164,6 +167,8 @@ class FrigateMonitorCore:
             d["color"] = e.color
             d["display_label"] = e.display_label
             d["duration_s"] = e.duration_s
+            if e.description:
+                d["description"] = e.description
             return d
 
         def _health(h: SystemHealth | None) -> dict[str, Any] | None:
@@ -474,6 +479,11 @@ class FrigateMonitorCore:
                 if fe.start_time > (self._last_event_ts or 0):
                     self._last_event_ts = fe.start_time
 
+                # Capture LLM/GenAI descriptions that arrive via polling (e.g. generated after the initial event)
+                if fe.description and fe.id not in self._logged_llm_descriptions:
+                    self.add_log(f"LLM: Description for {fe.display_label or fe.label} on {fe.camera} — {fe.description[:180]}", "info")
+                    self._logged_llm_descriptions.add(fe.id)
+
             if new_events:
                 combined = new_events + self.recent_events
                 self.recent_events = sorted(
@@ -486,6 +496,12 @@ class FrigateMonitorCore:
                     self.add_log(f"New event: {ev.display_label} on {ev.camera}", "success")
                 if len(new_events) > 3:
                     self.add_log(f"+{len(new_events)-3} more events", "info")
+
+                # Catch LLM descriptions that may have been added to existing recent events (polling path)
+                for e in self.recent_events:
+                    if e.description and e.id not in self._logged_llm_descriptions:
+                        self.add_log(f"LLM: Description for {e.display_label or e.label} on {e.camera} — {e.description[:180]}", "info")
+                        self._logged_llm_descriptions.add(e.id)
         except Exception as e:
             self.add_log(f"Events poll error: {e}", "warning")
 
@@ -552,6 +568,19 @@ class FrigateMonitorCore:
                     self.add_log(msg, "warning" if rev.severity == "alert" else "info")
                     if rev.id:
                         self._logged_review_ids.add(rev.id)
+
+                # Log LLM/GenAI review summary (structured title + shortSummary from Frigate GenAI)
+                if getattr(rev, "genai_summary", None) and rev.id and rev.id not in self._logged_review_ids:
+                    g = rev.genai_summary
+                    title = g.get("title", "")
+                    short = g.get("shortSummary", "")
+                    msg = f"LLM: Review summary for {rev.camera}"
+                    if title:
+                        msg += f" — {title}"
+                    if short:
+                        msg += f" ({short})"
+                    self.add_log(msg, "info")
+                    self._logged_review_ids.add(rev.id)
 
                 if start > (self._last_review_ts or 0):
                     self._last_review_ts = start
@@ -657,35 +686,44 @@ class FrigateMonitorCore:
                 else:
                     self.add_log("MQTT connection timeout — falling back to polling?", "warning")
 
-                async for event in self._mqtt_client.events():
+                async for payload in self._mqtt_client.messages():
                     if self.demo:
                         continue
                     try:
-                        # Reconstruct using the same fallbacks as original
-                        raw = event.raw or {}
+                        topic = payload.get("_topic", "")
+                        if "tracked_object_update" in topic:
+                            self._handle_genai_update(payload)
+                            continue
+
+                        # Reconstruct using the same fallbacks as original for events
+                        raw = payload
                         after = raw.get("after") or {}
                         before = raw.get("before") or {}
                         data = raw.get("data") or after.get("data") or before.get("data") or {}
 
-                        # Prefer the already-normalized FrigateMqttEvent fields, fall back to raw
+                        # Prefer the already-normalized fields, fall back to raw
+                        # (use payload directly since we no longer have FrigateMqttEvent wrapper here)
                         fe = FrigateEvent(
-                            id=event.id or after.get("id") or before.get("id") or raw.get("id", ""),
-                            camera=event.camera,
-                            label=event.label,
-                            start_time=event.start_time,
-                            end_time=event.end_time,
-                            top_score=event.top_score,
-                            has_snapshot=event.has_snapshot,
-                            has_clip=event.has_clip,
-                            zones=event.zones or [],
+                            id=payload.get("id") or after.get("id") or before.get("id") or raw.get("id", ""),
+                            camera=payload.get("camera") or after.get("camera") or before.get("camera", "unknown"),
+                            label=payload.get("label") or after.get("label") or before.get("label", "object"),
+                            start_time=float((payload.get("start_time") or after.get("start_time") or before.get("start_time") or 0)),
+                            end_time=float(payload.get("end_time") or after.get("end_time") or before.get("end_time") or 0) or None,
+                            top_score=payload.get("top_score") or after.get("top_score") or before.get("top_score"),
+                            has_snapshot=bool(payload.get("has_snapshot") or after.get("has_snapshot") or before.get("has_snapshot")),
+                            has_clip=bool(payload.get("has_clip") or after.get("has_clip") or before.get("has_clip")),
+                            zones=(payload.get("zones") or after.get("zones") or before.get("zones") or []),
                             sub_label=raw.get("sub_label") or after.get("sub_label") or before.get("sub_label"),
                             average_estimated_speed=data.get("average_estimated_speed"),
                             velocity_angle=data.get("velocity_angle"),
                             attributes=data.get("attributes") or [],
+                            description=raw.get("description") or after.get("description") or data.get("description"),
                         )
 
                         if fe.start_time > (self._last_event_ts or 0):
                             self._last_event_ts = fe.start_time
+
+                        event_type = payload.get("type", "new")
 
                         # Exact late-arrival guard from original
                         is_tracked = any(e.id == fe.id for e in self.recent_events)
@@ -693,11 +731,11 @@ class FrigateMonitorCore:
                             current_min_start = min(
                                 (e.start_time for e in self.recent_events), default=0
                             )
-                            if event.type != "new" and fe.start_time < current_min_start:
+                            if event_type != "new" and fe.start_time < current_min_start:
                                 continue
 
                         # Exact insert/replace logic
-                        if event.type == "new" or not is_tracked:
+                        if event_type == "new" or not is_tracked:
                             self.recent_events = [fe] + [
                                 e for e in self.recent_events if e.id != fe.id
                             ][: self.max_events - 1]
@@ -719,10 +757,15 @@ class FrigateMonitorCore:
                         self._notify("events", self.recent_events)
 
                         label = fe.display_label
-                        if event.type == "new" or not is_tracked:
+                        if event_type == "new" or not is_tracked:
                             self.add_log(f"New event (MQTT): {label} on {fe.camera}", "success")
-                        elif event.type == "end":
+                        elif event_type == "end":
                             self.add_log(f"Event ended (MQTT): {label} on {fe.camera}", "info")
+
+                        # Log LLM/GenAI description if present in this event payload (for cases where it arrives with the event)
+                        if fe.description and fe.id not in self._logged_llm_descriptions:
+                            self.add_log(f"LLM: Description for {label} on {fe.camera} — {fe.description[:180]}", "info")
+                            self._logged_llm_descriptions.add(fe.id)
                     except Exception as e:
                         self.add_log(f"MQTT event parse/render error: {e}", "warning")
                         continue
@@ -755,6 +798,29 @@ class FrigateMonitorCore:
                 if not is_dns_error:
                     # For other errors, keep the original short fallback notice
                     self.add_log("MQTT failed — falling back to event polling", "warning")
+
+    def _handle_genai_update(self, payload: dict) -> None:
+        """Handle Frigate tracked_object_update messages for GenAI/LLM activity (e.g. new descriptions)."""
+        try:
+            if payload.get("type") != "description":
+                return
+            event_id = payload.get("id") or payload.get("after", {}).get("id", "")
+            if not event_id or event_id in self._logged_llm_descriptions:
+                return
+            camera = payload.get("camera") or payload.get("after", {}).get("camera", "unknown")
+            label = payload.get("label") or payload.get("after", {}).get("label", "object")
+            desc = payload.get("description") or payload.get("after", {}).get("description", "")
+            if desc:
+                self.add_log(f"LLM: Description for {label} on {camera} — {desc[:180]}", "info")
+                self._logged_llm_descriptions.add(event_id)
+                # Update any in-memory event so the web UI / TUI can show the description immediately
+                for e in self.recent_events:
+                    if e.id == event_id:
+                        e.description = desc
+                        self._notify("events", self.recent_events)
+                        break
+        except Exception as e:
+            self.add_log(f"LLM description update parse error: {e}", "warning")
 
     # ------------------------------------------------------------------
     # Demo data (identical to original TUI)
@@ -819,6 +885,7 @@ class FrigateMonitorCore:
                 zones=["front_yard"],
                 sub_label=None,
                 average_estimated_speed=2.3,
+                description="A person in a dark jacket is walking up the driveway carrying what appears to be a bag.",
             ),
             FrigateEvent(
                 id="demo-evt-2",
@@ -850,3 +917,8 @@ class FrigateMonitorCore:
         self.recent_events = sorted(samples, key=lambda x: x.start_time, reverse=True)
         self._notify("events", self.recent_events)
         self.add_log("Seeded 3 demo events (for Events tab testing)", "info")
+        # Simulate an LLM-generated description in demo so activity log shows LLM record
+        for e in self.recent_events:
+            if e.description and e.id not in self._logged_llm_descriptions:
+                self.add_log(f"LLM (demo): Description for {e.display_label or e.label} on {e.camera} — {e.description[:120]}", "info")
+                self._logged_llm_descriptions.add(e.id)

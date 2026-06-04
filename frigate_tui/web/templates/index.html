@@ -383,7 +383,7 @@
       tr.innerHTML = `
         <td class="font-mono text-[#6b7280] whitespace-nowrap min-w-24">${ts}</td>
         <td>${ev.camera}</td>
-        <td>${labelHtml}</td>
+        <td>${labelHtml}${ev.description ? `<br><span style="font-size:9px;color:#6b7280;max-width:180px;display:inline-block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${ev.description.replace(/"/g,'&quot;')}">${ev.description}</span>` : ''}</td>
         <td class="font-mono">${speed}</td>
         <td class="font-mono">${score}</td>
         <td class="font-mono">${dur}</td>
@@ -956,6 +956,7 @@
         <div>Score: ${ev.top_score != null ? ev.top_score.toFixed(2) : '—'} &nbsp; Duration: ${ev.duration_s ? ev.duration_s.toFixed(1)+'s' : '—'}</div>
         <div>Zones: ${(ev.zones||[]).join(', ') || '—'}</div>
         <div>Speed: ${ev.average_estimated_speed != null && ev.average_estimated_speed !== 0 ? ev.average_estimated_speed.toFixed(1) : '—'} ${ev.velocity_angle != null ? ' @ ' + ev.velocity_angle.toFixed(0) + '°' : ''}</div>
+        ${ev.description ? `<div style="margin-top:4px"><strong>LLM description:</strong> ${ev.description}</div>` : ''}
       `;
 
       media.innerHTML = '';

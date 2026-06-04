@@ -114,6 +114,7 @@ async def lifespan(app: FastAPI):
                         "color": e.color,
                         "display_label": e.display_label,
                         "duration_s": e.duration_s,
+                        "description": e.description,
                     })
                 asyncio.create_task(broadcaster.publish({"type": "events", "data": evs}))
             elif kind == "connection":

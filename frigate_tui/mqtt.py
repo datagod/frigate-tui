@@ -85,6 +85,10 @@ class FrigateMqttClient:
         # Also subscribe to camera-specific events for broader coverage
         await self._client.subscribe(f"{self.topic_prefix}/+/events")
 
+        # Subscribe to tracked object updates (used for GenAI/LLM descriptions, sub-labels, etc.)
+        await self._client.subscribe(f"{self.topic_prefix}/tracked_object_update")
+        await self._client.subscribe(f"{self.topic_prefix}/+/tracked_object_update")
+
     async def disconnect(self) -> None:
         """Disconnect from the MQTT broker."""
         if self._client:
@@ -95,9 +99,10 @@ class FrigateMqttClient:
             self._client = None
         self._connected.clear()
 
-    async def events(self) -> AsyncGenerator[FrigateMqttEvent, None]:
+    async def messages(self) -> AsyncGenerator[dict[str, Any], None]:
         """
-        Async generator that yields Frigate events as they arrive over MQTT.
+        Async generator that yields raw MQTT payloads (with _topic attached)
+        from all subscribed topics (events, tracked_object_update for GenAI, etc.).
         """
         if not self._client:
             raise RuntimeError("MQTT client is not connected. Call connect() first.")
@@ -105,11 +110,26 @@ class FrigateMqttClient:
         async for message in self._client.messages:
             try:
                 payload = json.loads(message.payload.decode())
-                event = self._parse_event(payload)
-                if event:
-                    yield event
+                payload["_topic"] = str(message.topic)
+                yield payload
             except Exception:
                 # Ignore malformed messages
+                continue
+
+    async def events(self) -> AsyncGenerator[FrigateMqttEvent, None]:
+        """
+        Async generator that yields Frigate events as they arrive over MQTT (legacy).
+        """
+        if not self._client:
+            raise RuntimeError("MQTT client is not connected. Call connect() first.")
+
+        async for payload in self.messages():
+            try:
+                if "events" in payload.get("_topic", ""):
+                    event = self._parse_event(payload)
+                    if event:
+                        yield event
+            except Exception:
                 continue
 
     def _parse_event(self, payload: dict[str, Any]) -> FrigateMqttEvent | None:

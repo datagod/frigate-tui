@@ -134,6 +134,7 @@ class FrigateEvent:
     average_estimated_speed: float | None = None
     velocity_angle: float | None = None
     attributes: list[str] = field(default_factory=list)
+    description: str | None = None  # LLM/GenAI generated description (object descriptions feature)
 
     @property
     def duration_s(self) -> float:
@@ -165,6 +166,7 @@ class ReviewItem:
     objects: list[str] = field(default_factory=list)
     sub_labels: list[str] = field(default_factory=list)
     zones: list[str] = field(default_factory=list)
+    genai_summary: dict | None = None  # LLM-generated review summary (title, scene, shortSummary, etc.)
 
     @property
     def duration_s(self) -> float:
@@ -229,6 +231,7 @@ def frigate_event_from_dict(raw: dict[str, Any], *, data: dict[str, Any] | None 
             average_estimated_speed=data.get("average_estimated_speed"),
             velocity_angle=data.get("velocity_angle"),
             attributes=data.get("attributes") or [],
+            description=raw.get("description") or data.get("description"),
         )
     except Exception:
         return None
@@ -245,6 +248,7 @@ def review_item_from_dict(raw: dict[str, Any]) -> ReviewItem | None:
             except Exception:
                 end = None
         data = raw.get("data", {}) or {}
+        genai_summary = data.get("genai") or raw.get("genai") or raw.get("data", {}).get("genai")
         return ReviewItem(
             id=str(raw.get("id", "")),
             camera=str(raw.get("camera", "unknown")),
@@ -255,6 +259,7 @@ def review_item_from_dict(raw: dict[str, Any]) -> ReviewItem | None:
             objects=data.get("objects") or [],
             sub_labels=data.get("sub_labels") or [],
             zones=data.get("zones") or [],
+            genai_summary=genai_summary if isinstance(genai_summary, dict) else None,
         )
     except Exception:
         return None
