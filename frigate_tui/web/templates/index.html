@@ -81,6 +81,11 @@
     <div class="flex items-center gap-1"><span class="text-[#6b7280] font-semibold">DETECTION</span> <span id="sum-detection" class="metric-value">{{ (snapshot.summary.detection_fps or 0)|round(1) }}</span><canvas id="spark-detection" width="55" height="16" class="ml-1"></canvas></div>
     <div><span class="text-[#6b7280] font-semibold">GPU</span> <span id="sum-gpu" class="metric-value">{{ snapshot.summary.gpu or '—' }}</span></div>
     <div class="flex items-center gap-1"><span class="text-[#6b7280] font-semibold">SKIPPED</span> <span id="sum-skipped" class="metric-value">{{ (snapshot.summary.skipped_fps or 0)|round(1) }}</span><canvas id="spark-skipped" width="55" height="16" class="ml-1"></canvas></div>
+    <div class="flex items-center gap-1 ml-4 text-xs">
+      <span class="text-[#6b7280] font-semibold">POLL</span>
+      <input id="poll-interval" type="number" min="0.1" step="0.1" value="1" class="w-14 bg-[#161b26] border border-[#4a5263] text-xs px-1 py-0.5 rounded" />
+      <span class="text-[#6b7280]">s</span>
+    </div>
     <div class="ml-auto text-[10px] text-[#6b7280]">Live via core • SSE • identical logic to TUI</div>
   </div>
 
@@ -108,7 +113,7 @@
             behavior are identical to the TUI.
           </div>
           <div class="mt-4 text-xs text-[#6b7280]">
-            Useful keys (global): <span class="font-mono">1-4</span> switch tabs • <span class="font-mono">r</span> refresh • <span class="font-mono">c</span> clear log • <span class="font-mono">?</span> help<br>
+            Useful keys (global): <span class="font-mono">1-4</span> switch tabs • <span class="font-mono">r</span> refresh • <span class="font-mono">c</span> clear log • <span class="font-mono">p</span> cycle poll • <span class="font-mono">?</span> help<br>
             Click any event row for snapshot + clip links (when available).
           </div>
         </div>
@@ -920,6 +925,10 @@
         case 'connection':
           updateConnection(data);
           break;
+        case 'poll_interval':
+          const pollInputLive = document.getElementById('poll-interval');
+          if (pollInputLive && data != null) pollInputLive.value = data;
+          break;
         case 'version':
           const v = document.getElementById('frigate-ver');
           if (v && data) v.textContent = data;
@@ -941,8 +950,9 @@
     }
 
     function showHelp() {
-      alert('Keys: 1-4 switch tabs • r refresh • c clear log • ? this help\n\n' +
-            'The web UI receives the exact same log messages, camera health, event ordering, and pressure calculations as the terminal TUI because they share FrigateMonitorCore.');
+      alert('Keys: 1-4 switch tabs • r refresh • c clear log • p cycle poll speed • ? this help\n\n' +
+            'The web UI receives the exact same log messages, camera health, event ordering, and pressure calculations as the terminal TUI because they share FrigateMonitorCore.\n\n' +
+            'You can also change the poll interval live using the POLL input in the top summary bar.');
     }
 
     function showEventModal(ev) {
@@ -1016,6 +1026,26 @@
       // Initial data from server-rendered snapshot (great first paint)
       const snap = {{ snapshot | tojson }};
       applySnapshot(snap);
+
+      // Live poll interval control (runtime change to core polling speed)
+      const pollInput = document.getElementById('poll-interval');
+      if (pollInput) {
+        if (snap.poll_interval != null) pollInput.value = snap.poll_interval;
+        let debounceTimer;
+        pollInput.onchange = () => {
+          clearTimeout(debounceTimer);
+          debounceTimer = setTimeout(() => {
+            const v = parseFloat(pollInput.value) || 1.0;
+            fetch('/api/set_poll_interval', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ interval: v })
+            }).then(r => r.json()).then(d => {
+              if (d && d.poll_interval != null) pollInput.value = d.poll_interval;
+            }).catch(() => {});
+          }, 250);
+        };
+      }
 
       // Start on overview
       switchTab('overview');

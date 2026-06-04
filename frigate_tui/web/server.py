@@ -121,6 +121,8 @@ async def lifespan(app: FastAPI):
                 asyncio.create_task(broadcaster.publish({"type": "connection", "data": payload}))
             elif kind == "version":
                 asyncio.create_task(broadcaster.publish({"type": "version", "data": payload}))
+            elif kind == "poll_interval":
+                asyncio.create_task(broadcaster.publish({"type": "poll_interval", "data": payload}))
         except Exception:
             # Broadcaster must never crash the core loop
             pass
@@ -179,6 +181,16 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
     async def api_refresh():
         await core.refresh_now()
         return {"ok": True}
+
+    @app.post("/api/set_poll_interval")
+    async def api_set_poll_interval(request: Request):
+        try:
+            body = await request.json()
+            interval = float(body.get("interval", 1.0))
+            core.set_poll_interval(interval)
+            return JSONResponse({"ok": True, "poll_interval": core.poll_interval})
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
     @app.get("/api/snapshot/{event_id}")
     async def api_snapshot(event_id: str, request: Request):

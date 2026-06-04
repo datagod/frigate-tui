@@ -58,6 +58,8 @@ class FrigateMonitorCore:
         s = settings or {}
         self.frigate_url: str = str(s.get("frigate_url", "http://localhost:5000")).rstrip("/")
         self.poll_interval: float = float(s.get("poll_interval", 1.0))
+        self.review_interval: float = float(s.get("review_interval", 8.0))
+        self.timeline_interval: float = float(s.get("timeline_interval", 5.0))
         self.stats_log_interval: float = float(s.get("stats_log_interval", 600.0))
         self.max_events: int = int(s.get("max_events", 150))
         self.demo: bool = bool(s.get("demo", False))
@@ -131,6 +133,7 @@ class FrigateMonitorCore:
           - "events" -> list[FrigateEvent]  (authoritative current list; events may include .description from Frigate GenAI/LLM)
           - "log" -> {"ts": str, "level": str, "message": str}
           - "connection" -> {"ok": bool, "latency_ms": int|None, "last_error": str|None, "url": str}
+          - "poll_interval" -> float (current main poll rate in seconds)
         """
         self._listeners.append(callback)
 
@@ -202,6 +205,7 @@ class FrigateMonitorCore:
             "summary": summary,
             "demo": self.demo,
             "max_events": self.max_events,
+            "poll_interval": self.poll_interval,
             "health_history": self.health_history[-300:],  # ~5 min for charts
             "cameras_history": self.cameras_history[-300:],
         }
@@ -241,7 +245,7 @@ class FrigateMonitorCore:
 
         # Always poll stats
         self._tasks.append(
-            asyncio.create_task(self._interval_loop("stats", self.poll_interval, self._refresh_stats))
+            asyncio.create_task(self._interval_loop("stats", lambda: self.poll_interval, self._refresh_stats))
         )
 
         # Events: MQTT preferred, else polling (exact same decision tree)
@@ -254,18 +258,20 @@ class FrigateMonitorCore:
             self.add_log("MQTT event subscription enabled", "info")
         else:
             ev_interval = max(2.0, self.poll_interval * 2)
+            ev_get = lambda: max(2.0, self.poll_interval * 2)
             self._tasks.append(
-                asyncio.create_task(self._interval_loop("events", ev_interval, self._refresh_events))
+                asyncio.create_task(self._interval_loop("events", ev_get, self._refresh_events))
             )
             self._event_polling_active = True
             self.add_log("Event polling started (MQTT not configured). Stats logged every ~10s.", "info")
 
         # Higher-level signals (only used for activity log, same as TUI)
+        # These are fixed but could be made dynamic via self.review_interval etc if needed
         self._tasks.append(
-            asyncio.create_task(self._interval_loop("reviews", 8.0, self._refresh_reviews))
+            asyncio.create_task(self._interval_loop("reviews", lambda: self.review_interval, self._refresh_reviews))
         )
         self._tasks.append(
-            asyncio.create_task(self._interval_loop("timeline", 5.0, self._refresh_timeline))
+            asyncio.create_task(self._interval_loop("timeline", lambda: self.timeline_interval, self._refresh_timeline))
         )
 
         # Prime stats immediately
@@ -303,10 +309,18 @@ class FrigateMonitorCore:
         await self._refresh_stats()
         await self._refresh_events()
 
+    def set_poll_interval(self, interval: float) -> None:
+        """Change the main polling speed at runtime (affects stats + events polling rate).
+        Reviews and timeline use their own *_interval attrs (also overridable in config)."""
+        old = self.poll_interval
+        self.poll_interval = max(0.1, float(interval))
+        self.add_log(f"Poll interval set to {self.poll_interval:.1f}s (was {old:.1f}s)", "info")
+        self._notify("poll_interval", self.poll_interval)
+
     async def _interval_loop(
-        self, name: str, interval: float, func: Callable[[], Awaitable[None]]
+        self, name: str, get_interval: Callable[[], float], func: Callable[[], Awaitable[None]]
     ) -> None:
-        """Generic interval driver (replacement for Textual set_interval)."""
+        """Generic interval driver (replacement for Textual set_interval). The get_interval callable allows runtime changes to poll speed."""
         while self._running:
             try:
                 await func()
@@ -315,7 +329,7 @@ class FrigateMonitorCore:
             except Exception as e:
                 # Never let a single interval kill the core
                 self.add_log(f"{name} interval error: {e}", "warning")
-            await asyncio.sleep(interval)
+            await asyncio.sleep(get_interval())
 
     # ------------------------------------------------------------------
     # Error formatting (exact messages for parity in logs/status)

@@ -118,6 +118,7 @@ class FrigateMonitor(App[None]):
         Binding("2", "switch_tab('cameras')", "Cameras", show=False),
         Binding("3", "switch_tab('events')", "Events", show=False),
         Binding("4", "switch_tab('health')", "Health", show=False),
+        Binding("p", "set_poll_interval", "Cycle Poll", show=True),
     ]
 
     CSS = """
@@ -292,6 +293,9 @@ class FrigateMonitor(App[None]):
                 yield Label("SKIPPED", classes="metric-label")
                 yield Label("—", id="skipped-fps", classes="metric-value")
 
+                yield Label("POLL", classes="metric-label")
+                yield Label("1.0s", id="poll-interval", classes="metric-value")
+
         # Main horizontal split: left = tabs/views, right = live activity log
         with Horizontal(id="main-split"):
             # Left side - the existing dashboard views
@@ -303,6 +307,7 @@ class FrigateMonitor(App[None]):
                             "The **Activity Log** on the right shows a live trace of what the TUI is doing.\n\n"
                             "Useful keys:\n"
                             "  r          Force refresh\n"
+                            "  p          Cycle poll interval (0.5/1/2/5/10s)\n"
                             "  ?          Help\n"
                             "  2 / 3 / 4  Switch tabs\n"
                             "  c          Clear log\n\n"
@@ -350,6 +355,10 @@ class FrigateMonitor(App[None]):
 
         # Prime the on-screen version label from whatever the core discovered
         self._update_version_label()
+        try:
+            self.query_one("#poll-interval", Label).update(f"{self.core.poll_interval:.1f}s")
+        except Exception:
+            pass
 
         # Initial pump (core already did a stats refresh inside start, but ensure renders)
         self.call_after_refresh(self._render_cameras)
@@ -405,6 +414,11 @@ class FrigateMonitor(App[None]):
                 self._update_connection()
             elif kind == "version":
                 self._update_version_label()
+            elif kind == "poll_interval":
+                try:
+                    self.query_one("#poll-interval", Label).update(f"{float(payload):.1f}s")
+                except Exception:
+                    pass
         except Exception:
             # Never let a listener break the TUI
             pass
@@ -653,7 +667,7 @@ class FrigateMonitor(App[None]):
 
     def action_help(self) -> None:
         self.notify(
-            "q quit • r refresh • 1-4 tabs • Tab/Shift+Tab focus\n"
+            "q quit • r refresh • 1-4 tabs • Tab/Shift+Tab focus • p cycle poll speed\n"
             "Events auto-append when new detections occur.",
             title="Frigate TUI Help",
             timeout=5,
@@ -662,6 +676,21 @@ class FrigateMonitor(App[None]):
     def action_switch_tab(self, tab_id: str) -> None:
         tc = self.query_one(TabbedContent)
         tc.active = tab_id
+
+    def action_set_poll_interval(self) -> None:
+        """Cycle through common poll intervals for live control from the TUI."""
+        options = [0.5, 1.0, 2.0, 5.0, 10.0]
+        current = getattr(self.core, "poll_interval", 1.0)
+        try:
+            idx = options.index(round(current, 1))
+            new = options[(idx + 1) % len(options)]
+        except ValueError:
+            new = 1.0
+        self.core.set_poll_interval(new)
+        try:
+            self.query_one("#poll-interval", Label).update(f"{new:.1f}s")
+        except Exception:
+            pass
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         """Re-render tab contents when activated (handles lazy TabPane mounting)."""

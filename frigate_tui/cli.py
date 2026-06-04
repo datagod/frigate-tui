@@ -80,6 +80,8 @@ def run(
     final_interval = interval or yaml_cfg.get("poll_interval") or 1.0
     stats_log_interval = yaml_cfg.get("stats_log_interval", 600.0)
     max_events = yaml_cfg.get("max_events", 150)
+    review_interval = yaml_cfg.get("review_interval", 8.0)
+    timeline_interval = yaml_cfg.get("timeline_interval", 5.0)
 
     # Support common truthy values for FRIGATE_TUI_DEMO env var
     if not demo:
@@ -90,6 +92,8 @@ def run(
     settings = {
         "frigate_url": str(final_url).rstrip("/"),
         "poll_interval": float(final_interval),
+        "review_interval": float(review_interval),
+        "timeline_interval": float(timeline_interval),
         "stats_log_interval": float(stats_log_interval),
         "max_events": int(max_events),
         "demo": demo,
@@ -148,6 +152,8 @@ def web(
     final_interval = interval or yaml_cfg.get("poll_interval") or 1.0
     stats_log_interval = yaml_cfg.get("stats_log_interval", 600.0)
     max_events = yaml_cfg.get("max_events", 150)
+    review_interval = yaml_cfg.get("review_interval", 8.0)
+    timeline_interval = yaml_cfg.get("timeline_interval", 5.0)
 
     if not demo:
         demo_env = os.getenv("FRIGATE_TUI_DEMO", "").lower()
@@ -156,6 +162,8 @@ def web(
     settings = {
         "frigate_url": str(final_url).rstrip("/"),
         "poll_interval": float(final_interval),
+        "review_interval": float(review_interval),
+        "timeline_interval": float(timeline_interval),
         "stats_log_interval": float(stats_log_interval),
         "max_events": int(max_events),
         "demo": demo,
