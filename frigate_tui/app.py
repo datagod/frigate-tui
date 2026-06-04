@@ -142,6 +142,10 @@ class FrigateMonitor(App[None]):
     .metric-label { color: #6b7280; text-style: bold; }
     .metric-value { text-style: bold; }
 
+    #overview-status {
+        text-style: dim;
+    }
+
     .good { color: #22c55e; }
     .warn { color: #eab308; }
     .bad  { color: #ef4444; }
@@ -305,6 +309,8 @@ class FrigateMonitor(App[None]):
                         yield Static(
                             "Welcome to Frigate TUI.\n\n"
                             "The **Activity Log** on the right shows a live trace of what the TUI is doing.\n\n"
+                            "When Frigate GenAI is enabled, look for **LLM:** lines — object descriptions "
+                            "(MQTT or poll) and review summaries from /api/review.\n\n"
                             "Useful keys:\n"
                             "  r          Force refresh\n"
                             "  p          Cycle poll interval (0.5/1/2/5/10s)\n"
@@ -314,7 +320,7 @@ class FrigateMonitor(App[None]):
                             "This is the best place to see connection attempts, errors, and polling results.",
                             id="overview-welcome"
                         )
-                        yield Static("", id="overview-status", classes="text-xs text-[#6b7280] mt-2")
+                        yield Static("", id="overview-status")
 
                     with TabPane("Cameras", id="cameras"):
                         yield VerticalScroll(id="cameras-scroll")

@@ -40,6 +40,9 @@ COPY config.example.yaml docker-compose.yml ./
 #   docker compose --profile web up --build frigate-web
 #   (the --build is needed the first time to install the [web] extras)
 #
+# GenAI/LLM Activity Log lines need mqtt in config.yaml; TUI compose uses
+# network_mode: container:frigate so host "mqtt" works; web must reach the broker separately.
+#
 #   or for a one-off container:
 #   docker run -p 8080:8080 ... frigate-tui frigate-tui web --host 0.0.0.0 --port 8080
 CMD ["frigate-tui"]

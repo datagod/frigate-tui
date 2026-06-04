@@ -15,9 +15,11 @@ max_events: 150                        # how many events to keep in the live tab
 
 theme: "dark"                          # reserved for future theme switching
 
-# Real-time events via MQTT (recommended over polling)
+# Real-time events via MQTT (recommended over polling).
+# Also required for low-latency Frigate GenAI/LLM object descriptions in the Activity Log
+# (frigate/tracked_object_update). Without MQTT, descriptions still appear via HTTP polling.
 mqtt:
-  host: "mqtt"                 # When using the same Docker network as Frigate
+  host: "mqtt"                 # When using docker compose with network_mode: container:frigate
   port: 1883
   username: ""
   password: ""

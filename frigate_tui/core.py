@@ -89,6 +89,8 @@ class FrigateMonitorCore:
 
         # For de-duping review logs (same review id shouldn't spam the activity log)
         self._logged_review_ids: set[str] = set()
+        # Separate from review alerts — an alert log must not suppress the GenAI summary line
+        self._logged_review_genai_ids: set[str] = set()
 
         # Track event ids for which we've already logged an LLM/GenAI description
         self._logged_llm_descriptions: set[str] = set()
@@ -259,13 +261,14 @@ class FrigateMonitorCore:
             self._tasks.append(self._mqtt_task)
             self.add_log("MQTT event subscription enabled", "info")
         else:
-            ev_interval = max(2.0, self.poll_interval * 2)
             ev_get = lambda: max(2.0, self.poll_interval * 2)
             self._tasks.append(
                 asyncio.create_task(self._interval_loop("events", ev_get, self._refresh_events))
             )
             self._event_polling_active = True
             self.add_log("Event polling started (MQTT not configured). Stats logged every ~10s.", "info")
+
+        self._log_genai_monitoring_mode()
 
         # Higher-level signals (only used for activity log, same as TUI)
         # These are fixed but could be made dynamic via self.review_interval etc if needed
@@ -358,6 +361,62 @@ class FrigateMonitorCore:
         if len(self.log_entries) > self._max_log_entries:
             self.log_entries = self.log_entries[-self._max_log_entries :]
         self._notify("log", entry)
+
+    def _log_genai_monitoring_mode(self) -> None:
+        """One-time Activity Log note on how Frigate GenAI/LLM output reaches the monitor."""
+        if self.demo:
+            self.add_log(
+                "GenAI/LLM (demo): sample object descriptions appear in the Activity Log as LLM: lines",
+                "info",
+            )
+            return
+        if self._use_mqtt_for_events and self.mqtt_config:
+            self.add_log(
+                "GenAI/LLM: real-time via MQTT (tracked_object_update + events); "
+                "review summaries via /api/review poll",
+                "info",
+            )
+        elif self.mqtt_config:
+            self.add_log(
+                "GenAI/LLM: HTTP polling for descriptions (MQTT unavailable); "
+                "enable aiomqtt or fix broker for lower latency",
+                "warning",
+            )
+        else:
+            self.add_log(
+                "GenAI/LLM: HTTP polling only — add mqtt to config.yaml for live description updates",
+                "info",
+            )
+
+    def _log_llm_description(
+        self,
+        event: FrigateEvent,
+        *,
+        source: str = "",
+        demo: bool = False,
+    ) -> None:
+        if not event.description or event.id in self._logged_llm_descriptions:
+            return
+        label = event.display_label or event.label
+        prefix = "LLM (demo)" if demo else "LLM"
+        via = f" [{source}]" if source else ""
+        self.add_log(
+            f"{prefix}{via}: Description for {label} on {event.camera} — {event.description[:180]}",
+            "info",
+        )
+        self._logged_llm_descriptions.add(event.id)
+
+    def _surface_recent_llm_descriptions(self, events: list[FrigateEvent], *, limit: int = 3) -> None:
+        """Log a startup summary plus the newest descriptions already present in Frigate."""
+        with_desc = [e for e in events if e.description]
+        if not with_desc:
+            return
+        self.add_log(
+            f"GenAI/LLM: {len(with_desc)} loaded event(s) already include descriptions",
+            "info",
+        )
+        for e in sorted(with_desc, key=lambda x: x.start_time, reverse=True)[:limit]:
+            self._log_llm_description(e, source="startup")
 
     # ------------------------------------------------------------------
     # Stats (always running, drives summary + cameras + health + conn)
@@ -496,9 +555,7 @@ class FrigateMonitorCore:
                     self._last_event_ts = fe.start_time
 
                 # Capture LLM/GenAI descriptions that arrive via polling (e.g. generated after the initial event)
-                if fe.description and fe.id not in self._logged_llm_descriptions:
-                    self.add_log(f"LLM: Description for {fe.display_label or fe.label} on {fe.camera} — {fe.description[:180]}", "info")
-                    self._logged_llm_descriptions.add(fe.id)
+                self._log_llm_description(fe, source="poll")
 
             if new_events:
                 combined = new_events + self.recent_events
@@ -515,9 +572,7 @@ class FrigateMonitorCore:
 
                 # Catch LLM descriptions that may have been added to existing recent events (polling path)
                 for e in self.recent_events:
-                    if e.description and e.id not in self._logged_llm_descriptions:
-                        self.add_log(f"LLM: Description for {e.display_label or e.label} on {e.camera} — {e.description[:180]}", "info")
-                        self._logged_llm_descriptions.add(e.id)
+                    self._log_llm_description(e, source="poll")
         except Exception as e:
             self.add_log(f"Events poll error: {e}", "warning")
 
@@ -547,6 +602,7 @@ class FrigateMonitorCore:
                 self._last_event_ts = latest_ts
                 self._notify("events", self.recent_events)
                 self.add_log(f"Loaded {len(self.recent_events)} historical events on startup", "info")
+                self._surface_recent_llm_descriptions(self.recent_events)
         except Exception as e:
             self.add_log(f"Failed to load initial historical events: {e}", "warning")
 
@@ -586,17 +642,20 @@ class FrigateMonitorCore:
                         self._logged_review_ids.add(rev.id)
 
                 # Log LLM/GenAI review summary (structured title + shortSummary from Frigate GenAI)
-                if getattr(rev, "genai_summary", None) and rev.id and rev.id not in self._logged_review_ids:
+                if getattr(rev, "genai_summary", None) and rev.id and rev.id not in self._logged_review_genai_ids:
                     g = rev.genai_summary
                     title = g.get("title", "")
                     short = g.get("shortSummary", "")
-                    msg = f"LLM: Review summary for {rev.camera}"
+                    scene = g.get("scene", "")
+                    msg = f"LLM [review]: Summary for {rev.camera}"
                     if title:
                         msg += f" — {title}"
                     if short:
-                        msg += f" ({short})"
+                        msg += f" ({short[:120]})"
+                    elif scene:
+                        msg += f" ({str(scene)[:120]})"
                     self.add_log(msg, "info")
-                    self._logged_review_ids.add(rev.id)
+                    self._logged_review_genai_ids.add(rev.id)
 
                 if start > (self._last_review_ts or 0):
                     self._last_review_ts = start
@@ -698,7 +757,10 @@ class FrigateMonitorCore:
             async with self._mqtt_client:
                 connected = await self._mqtt_client.wait_until_connected(timeout=8.0)
                 if connected:
-                    self.add_log("MQTT connected — receiving events in real time", "success")
+                    self.add_log(
+                        "MQTT connected — events + GenAI description updates (tracked_object_update) in real time",
+                        "success",
+                    )
                 else:
                     self.add_log("MQTT connection timeout — falling back to polling?", "warning")
 
@@ -779,9 +841,7 @@ class FrigateMonitorCore:
                             self.add_log(f"Event ended (MQTT): {label} on {fe.camera}", "info")
 
                         # Log LLM/GenAI description if present in this event payload (for cases where it arrives with the event)
-                        if fe.description and fe.id not in self._logged_llm_descriptions:
-                            self.add_log(f"LLM: Description for {label} on {fe.camera} — {fe.description[:180]}", "info")
-                            self._logged_llm_descriptions.add(fe.id)
+                        self._log_llm_description(fe, source="mqtt-event")
                     except Exception as e:
                         self.add_log(f"MQTT event parse/render error: {e}", "warning")
                         continue
@@ -827,7 +887,7 @@ class FrigateMonitorCore:
             label = payload.get("label") or payload.get("after", {}).get("label", "object")
             desc = payload.get("description") or payload.get("after", {}).get("description", "")
             if desc:
-                self.add_log(f"LLM: Description for {label} on {camera} — {desc[:180]}", "info")
+                self.add_log(f"LLM [mqtt]: Description for {label} on {camera} — {desc[:180]}", "info")
                 self._logged_llm_descriptions.add(event_id)
                 # Update any in-memory event so the web UI / TUI can show the description immediately
                 for e in self.recent_events:
@@ -933,8 +993,5 @@ class FrigateMonitorCore:
         self.recent_events = sorted(samples, key=lambda x: x.start_time, reverse=True)
         self._notify("events", self.recent_events)
         self.add_log("Seeded 3 demo events (for Events tab testing)", "info")
-        # Simulate an LLM-generated description in demo so activity log shows LLM record
         for e in self.recent_events:
-            if e.description and e.id not in self._logged_llm_descriptions:
-                self.add_log(f"LLM (demo): Description for {e.display_label or e.label} on {e.camera} — {e.description[:120]}", "info")
-                self._logged_llm_descriptions.add(e.id)
+            self._log_llm_description(e, demo=True)

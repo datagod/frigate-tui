@@ -89,7 +89,7 @@ to the actual name of your container, or run with an override:
 docker compose run --rm --network container:your-frigate-container frigate-tui
 ```
 
-Once the TUI starts, look at the **right-hand Activity Log** for connection status and live activity.
+Once the TUI starts, look at the **right-hand Activity Log** for connection status and live activity. With Frigate GenAI enabled and `mqtt` configured in `config.yaml`, **LLM:** lines show object descriptions (real-time over MQTT when using `network_mode: container:frigate`) and review summaries from the review poll.
 
 ### Demo mode (no Frigate required)
 

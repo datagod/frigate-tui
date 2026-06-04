@@ -26,7 +26,9 @@ services:
       # Optional: NO_COLOR=1 to disable colors if needed
       # - NO_COLOR=${NO_COLOR:-}
 
-    # Mount the config so MQTT + other settings are picked up automatically
+    # Mount the config so MQTT + other settings are picked up automatically.
+    # With network_mode: container:frigate, mqtt.host "mqtt" resolves inside Frigate's
+    # network — required for real-time GenAI/LLM description lines in the Activity Log.
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
@@ -79,6 +81,9 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
+
+    # GenAI/LLM descriptions: set mqtt.host to an address this container can reach
+    # (e.g. your Frigate LAN IP or host.docker.internal if the broker is on the host).
 
     # Publish the web UI to the host so other machines on the LAN can reach it
     ports:
