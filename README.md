@@ -2,6 +2,8 @@
 
 A colorful, advanced terminal user interface **and web dashboard** for monitoring your [Frigate](https://github.com/blakeblackshear/frigate) NVR in real time.
 
+**Created with Grok Build**
+
 Both the TUI and the optional web UI share the exact same core logic (`FrigateMonitorCore`) for stats, health calculations, event handling, MQTT, activity logging, and demo mode — guaranteeing full feature parity.
 
 Watch camera FPS, detector queues / pressure, GPU usage, incoming events, and system health directly from your terminal (or tmux), or in a browser over your local network.
