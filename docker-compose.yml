@@ -70,11 +70,11 @@ services:
 
     environment:
       # Point this at an address the web container can reach Frigate on.
-      # Common choices:
-      #   - http://host.docker.internal:5000   (works on Docker Desktop + Linux with extra_hosts below)
+      # Now that services share the 'ai-network', you can use Docker service names:
+      #   - http://frigate:5000                (recommended with shared network)
+      #   - http://host.docker.internal:5000   (fallback)
       #   - http://192.168.1.50:5000           (your actual Frigate LAN IP)
-      #   - http://localhost:5000              (only if Frigate is on the host and you're using host networking)
-      - FRIGATE_TUI_URL=${FRIGATE_TUI_URL:-http://host.docker.internal:5000}
+      - FRIGATE_TUI_URL=${FRIGATE_TUI_URL:-http://frigate:5000}
       - FRIGATE_TUI_INTERVAL=${FRIGATE_TUI_INTERVAL:-1.0}
 
     volumes:
@@ -89,7 +89,11 @@ services:
     ports:
       - "${FRIGATE_WEB_PORT:-8080}:8080"
 
-    # Make host.docker.internal work reliably on Linux hosts
+    networks:
+      - default
+      - ai-network
+
+    # Make host.docker.internal work reliably on Linux hosts (still useful for other services)
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -103,4 +107,8 @@ services:
     #   DEMO=1 docker compose --profile web up frigate-web
     #   FRIGATE_TUI_URL=http://192.168.1.50:5000 docker compose --profile web up frigate-web
     #   FRIGATE_TUI_URL=http://localhost:5000   docker compose --profile web up frigate-web
+
+networks:
+  ai-network:
+    external: true
 

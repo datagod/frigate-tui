@@ -5,8 +5,14 @@ frigate_url: "http://localhost:5000"   # or http://your-frigate-host:5000
 poll_interval: 1.0                     # seconds between /api/stats refreshes (and rendering). Can be changed live in the web UI.
 review_interval: 8.0                   # seconds between review polls (for activity log)
 timeline_interval: 5.0                 # seconds between timeline polls (for activity log)
+timeline_log_enabled: true             # false = no Visible/Gone/Stationary lines in Activity Log
+timeline_log_stationary: false         # stationary rows are noisy; enable if you want them
+timeline_log_gone_min_score: 0.80      # min score to log Gone when a face/plate sub_label is present
+timeline_log_visible_min_score: 0.85   # min score for Visible without a sub_label (recognized faces always log)
 stats_log_interval: 600.0              # seconds between "Stats OK" messages in the Activity Log (errors always log immediately). Default is 10 minutes.
 max_events: 150                        # how many events to keep in the live table
+events_poll_interval: 8.0              # HTTP poll for /api/events (always on; keeps Events tab near Activity Log)
+events_reconcile_interval: 10.0        # full list resync from /api/events (heals MQTT/API cursor gaps)
 
 # Optional auth (only needed if your Frigate requires login and you are not on a trusted host)
 # auth:
@@ -24,6 +30,13 @@ mqtt:
   username: ""
   password: ""
   topic_prefix: "frigate"
+
+# GenAI Activity Report tab (web/TUI): hourly LLM summary of review/object GenAI messages
+# Uses the same Ollama/OpenAI-compatible endpoint as Frigate when base_url/model are omitted.
+genai_report:
+  base_url: http://ollama:11434
+  model: llama3.2:latest
+  timeout: 180
 
 # The same config file works for both the TUI (`frigate-tui`) and the web UI (`frigate-tui web`).
 # Web UI is served on :8080 by default (override with --port). See README for [web] install.

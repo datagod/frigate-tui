@@ -89,6 +89,9 @@ class FrigateMqttClient:
         await self._client.subscribe(f"{self.topic_prefix}/tracked_object_update")
         await self._client.subscribe(f"{self.topic_prefix}/+/tracked_object_update")
 
+        # Review updates (GenAI summaries land in after.data.metadata on update messages)
+        await self._client.subscribe(f"{self.topic_prefix}/reviews")
+
     async def disconnect(self) -> None:
         """Disconnect from the MQTT broker."""
         if self._client:

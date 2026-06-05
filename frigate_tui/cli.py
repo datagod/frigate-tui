@@ -42,6 +42,15 @@ def _load_yaml_config(path: Path | None) -> dict:
     return {}
 
 
+def _core_settings(yaml_cfg: dict, **overrides: object) -> dict:
+    """Merge YAML config with CLI/env overrides for FrigateMonitorCore."""
+    settings = dict(yaml_cfg)
+    for key, value in overrides.items():
+        if value is not None:
+            settings[key] = value
+    return settings
+
+
 @app.command()
 def run(
     url: Optional[str] = typer.Option(
@@ -88,17 +97,16 @@ def run(
         demo_env = os.getenv("FRIGATE_TUI_DEMO", "").lower()
         demo = demo_env in ("1", "true", "yes", "on")
 
-    # Minimal settings object for the app (will become a proper dataclass later)
-    settings = {
-        "frigate_url": str(final_url).rstrip("/"),
-        "poll_interval": float(final_interval),
-        "review_interval": float(review_interval),
-        "timeline_interval": float(timeline_interval),
-        "stats_log_interval": float(stats_log_interval),
-        "max_events": int(max_events),
-        "demo": demo,
-        "mqtt": yaml_cfg.get("mqtt"),  # Optional MQTT configuration for real-time events
-    }
+    settings = _core_settings(
+        yaml_cfg,
+        frigate_url=str(final_url).rstrip("/"),
+        poll_interval=float(final_interval),
+        review_interval=float(review_interval),
+        timeline_interval=float(timeline_interval),
+        stats_log_interval=float(stats_log_interval),
+        max_events=int(max_events),
+        demo=demo,
+    )
 
     FrigateMonitor(settings).run()
 
@@ -159,16 +167,16 @@ def web(
         demo_env = os.getenv("FRIGATE_TUI_DEMO", "").lower()
         demo = demo_env in ("1", "true", "yes", "on")
 
-    settings = {
-        "frigate_url": str(final_url).rstrip("/"),
-        "poll_interval": float(final_interval),
-        "review_interval": float(review_interval),
-        "timeline_interval": float(timeline_interval),
-        "stats_log_interval": float(stats_log_interval),
-        "max_events": int(max_events),
-        "demo": demo,
-        "mqtt": yaml_cfg.get("mqtt"),
-    }
+    settings = _core_settings(
+        yaml_cfg,
+        frigate_url=str(final_url).rstrip("/"),
+        poll_interval=float(final_interval),
+        review_interval=float(review_interval),
+        timeline_interval=float(timeline_interval),
+        stats_log_interval=float(stats_log_interval),
+        max_events=int(max_events),
+        demo=demo,
+    )
 
     # Lazy import so that a plain `pip install frigate-tui` (TUI only) never pulls web deps.
     try:

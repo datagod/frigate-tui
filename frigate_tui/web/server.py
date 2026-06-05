@@ -192,6 +192,33 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
+    @app.get("/api/genai/activity")
+    async def api_genai_activity(hours: float = 1.0):
+        """Structured GenAI messages from the last N hours, grouped by hour."""
+        hrs = max(0.25, min(72.0, float(hours)))
+        sections = core.get_genai_sections(hrs)
+        total = sum(s["count"] for s in sections)
+        return JSONResponse({"ok": True, "hours": hrs, "total": total, "sections": sections})
+
+    @app.post("/api/genai/report")
+    async def api_genai_report(request: Request):
+        """Send recent GenAI messages to the configured LLM for a narrative hourly report."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        hrs = max(0.25, min(24.0, float(body.get("hours", 1.0))))
+        result = await core.generate_genai_report(hrs)
+        return JSONResponse(result)
+
+    @app.get("/api/event/{event_id}")
+    async def api_event_detail(event_id: str):
+        """Event detail for modal: full object description + linked review GenAI if any."""
+        detail = await core.fetch_event_detail(event_id)
+        if not detail:
+            return JSONResponse({"ok": False, "error": "Event not found"}, status_code=404)
+        return JSONResponse({"ok": True, **detail})
+
     @app.get("/api/snapshot/{event_id}")
     async def api_snapshot(event_id: str, request: Request):
         """Proxy snapshot images so the browser doesn't need direct access to Frigate.

@@ -223,7 +223,7 @@ def frigate_event_from_dict(raw: dict[str, Any], *, data: dict[str, Any] | None 
             label=str(raw.get("label", "object")),
             start_time=float(raw.get("start_time", 0)),
             end_time=end_time,
-            top_score=raw.get("top_score"),
+            top_score=raw.get("top_score") if raw.get("top_score") is not None else data.get("top_score"),
             has_snapshot=bool(raw.get("has_snapshot")),
             has_clip=bool(raw.get("has_clip")),
             zones=raw.get("zones") or [],
@@ -237,6 +237,54 @@ def frigate_event_from_dict(raw: dict[str, Any], *, data: dict[str, Any] | None 
         return None
 
 
+def frigate_event_from_mqtt_payload(payload: dict[str, Any]) -> FrigateEvent | None:
+    """Normalize a Frigate MQTT event message (frigate/events or frigate/<camera>/events)."""
+    topic = str(payload.get("_topic", ""))
+    if "tracked_object_update" in topic or "events" not in topic:
+        return None
+    after = payload.get("after") or {}
+    before = payload.get("before") or {}
+    event_data = after or before
+    if not event_data:
+        return None
+    merged: dict[str, Any] = dict(event_data)
+    for key in (
+        "id",
+        "camera",
+        "label",
+        "start_time",
+        "end_time",
+        "top_score",
+        "has_snapshot",
+        "has_clip",
+        "zones",
+        "sub_label",
+        "description",
+    ):
+        if payload.get(key) is not None and merged.get(key) is None:
+            merged[key] = payload[key]
+    if not merged.get("data"):
+        merged["data"] = after.get("data") or before.get("data") or {}
+    return frigate_event_from_dict(merged)
+
+
+def genai_summary_from_review_data(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract Frigate GenAI review summary from review item data.
+
+    Frigate 0.17+ stores LLM output in data.metadata (title, scene, shortSummary, …).
+    Older payloads may use data.genai directly.
+    """
+    if not isinstance(data, dict):
+        return None
+    legacy = data.get("genai")
+    if isinstance(legacy, dict) and (legacy.get("title") or legacy.get("shortSummary") or legacy.get("scene")):
+        return legacy
+    meta = data.get("metadata")
+    if isinstance(meta, dict) and (meta.get("title") or meta.get("shortSummary") or meta.get("scene")):
+        return meta
+    return None
+
+
 def review_item_from_dict(raw: dict[str, Any]) -> ReviewItem | None:
     """Normalize a raw review item (from /api/review) into ReviewItem."""
     try:
@@ -248,7 +296,13 @@ def review_item_from_dict(raw: dict[str, Any]) -> ReviewItem | None:
             except Exception:
                 end = None
         data = raw.get("data", {}) or {}
-        genai_summary = data.get("genai") or raw.get("genai") or raw.get("data", {}).get("genai")
+        genai_summary = genai_summary_from_review_data(data)
+        if not genai_summary:
+            legacy = raw.get("genai")
+            if isinstance(legacy, dict) and (
+                legacy.get("title") or legacy.get("shortSummary") or legacy.get("scene")
+            ):
+                genai_summary = legacy
         return ReviewItem(
             id=str(raw.get("id", "")),
             camera=str(raw.get("camera", "unknown")),

@@ -55,6 +55,18 @@
     .data-table tr:nth-child(even) { background: #161b26; }
 
     .modal { background: rgba(15,17,23,0.92); }
+
+    /* GenAI report — compact rendered markdown */
+    .genai-report-md { font-size: 0.8125rem; line-height: 1.4; }
+    .genai-report-md .genai-md-h-top { font-size: 0.875rem; font-weight: 700; color: #c4b5fd; margin: 0 0 0.35rem; }
+    .genai-report-md .genai-md-h { font-size: 0.8125rem; font-weight: 600; color: #a5b4fc; margin: 0.5rem 0 0.2rem; padding-top: 0.25rem; border-top: 1px solid #272e3b; }
+    .genai-report-md .genai-md-h:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+    .genai-report-md .genai-md-p { margin: 0 0 0.3rem; color: #d1d5db; }
+    .genai-report-md .genai-md-ul { margin: 0 0 0.35rem; padding-left: 1.1rem; list-style: disc; color: #d1d5db; }
+    .genai-report-md .genai-md-ul li { margin: 0 0 0.15rem; padding: 0; }
+    .genai-hour-card { padding: 0.5rem 0.65rem; }
+    .genai-msg { padding: 0.25rem 0; border-bottom: 1px solid #272e3b; line-height: 1.35; }
+    .genai-msg:last-child { border-bottom: none; }
   </style>
 </head>
 <body class="min-h-screen text-sm">
@@ -99,6 +111,7 @@
         <div onclick="switchTab('cameras')"  id="tab-cameras"  class="tab">Cameras</div>
         <div onclick="switchTab('events')"   id="tab-events"   class="tab">Events</div>
         <div onclick="switchTab('health')"   id="tab-health"   class="tab">Health / Queues</div>
+        <div onclick="switchTab('genai')"    id="tab-genai"    class="tab">GenAI Report</div>
       </div>
 
       <!-- Tab contents -->
@@ -132,7 +145,7 @@
             behavior are identical to the TUI.
           </div>
           <div class="mt-4 text-xs text-[#6b7280]">
-            Useful keys (global): <span class="font-mono">1-4</span> switch tabs • <span class="font-mono">r</span> refresh • <span class="font-mono">c</span> clear log • <span class="font-mono">p</span> cycle poll • <span class="font-mono">?</span> help<br>
+            Useful keys (global): <span class="font-mono">1-5</span> switch tabs • <span class="font-mono">r</span> refresh • <span class="font-mono">c</span> clear log • <span class="font-mono">p</span> cycle poll • <span class="font-mono">?</span> help<br>
             Click any event row for snapshot + clip links (when available).
           </div>
         </div>
@@ -155,7 +168,8 @@
                 <tr class="text-left text-[#6b7280] border-b border-[#4a5263]">
                   <th class="w-24 min-w-24">Time</th>
                   <th class="w-28">Camera</th>
-                  <th>Label</th>
+                  <th class="w-32">Label</th>
+                  <th class="min-w-[200px]">AI Description</th>
                   <th class="w-14">Speed</th>
                   <th class="w-12">Score</th>
                   <th class="w-12">Dur</th>
@@ -165,6 +179,35 @@
               </thead>
               <tbody id="events-tbody" class="font-mono"></tbody>
             </table>
+          </div>
+        </div>
+
+        <!-- GenAI hourly activity report -->
+        <div id="pane-genai" class="hidden flex flex-col min-h-0 h-full">
+          <div class="flex flex-wrap items-center gap-2 mb-3 text-xs">
+            <span class="text-[#6b7280]">Summarize GenAI messages from the last</span>
+            <select id="genai-hours" class="bg-[#161b26] border border-[#4a5263] rounded px-2 py-1 text-[#c0c5d1]">
+              <option value="1" selected>1 hour</option>
+              <option value="3">3 hours</option>
+              <option value="6">6 hours</option>
+              <option value="12">12 hours</option>
+              <option value="24">24 hours</option>
+            </select>
+            <button id="genai-generate-btn" onclick="generateGenaiReport()"
+              class="px-3 py-1 rounded bg-[#4f46e5] hover:bg-[#6366f1] text-white font-medium">
+              Generate AI Report
+            </button>
+            <button onclick="loadGenaiActivity()" class="px-2 py-1 rounded border border-[#4a5263] text-[#9ca3af] hover:text-white">
+              Refresh messages
+            </button>
+            <span id="genai-status" class="text-[#6b7280] ml-1"></span>
+          </div>
+          <div id="genai-report-panel" class="hidden mb-2 rounded border border-[#4a5263] bg-[#12151c] p-2">
+            <div class="text-[11px] font-semibold text-[#a5b4fc] mb-1 uppercase tracking-wide">AI narrative summary</div>
+            <div id="genai-report-text" class="genai-report-md"></div>
+          </div>
+          <div id="genai-hours-container" class="flex-1 overflow-auto space-y-2 text-[11px] leading-snug">
+            <div class="text-[#6b7280]">Select a time range and generate a report, or refresh to view raw GenAI messages by hour.</div>
           </div>
         </div>
 
@@ -234,6 +277,7 @@
         <button onclick="hideModal()" class="text-[#6b7280] hover:text-white">✕</button>
       </div>
       <div id="modal-body" class="text-sm"></div>
+      <div id="modal-ai" class="mt-3 hidden rounded border border-[#4a5263] bg-[#12151c] p-3"></div>
       <div id="modal-media" class="mt-3"></div>
     </div>
   </div>
@@ -282,6 +326,10 @@
       }
 
       // Lazy init health charts when tab shown (so container has size)
+      if (name === 'genai') {
+        loadGenaiActivity();
+      }
+
       if (name === 'health') {
         if (!globalPressureChart && (healthHistory.length > 0 || camerasHistory.length > 0)) {
           initHealthCharts(healthHistory, camerasHistory);
@@ -396,7 +444,7 @@
 
       if (!events || !events.length) {
         if (tbody.children.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="8" class="text-[#6b7280] p-2">No events yet.</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="9" class="text-[#6b7280] p-2">No events yet.</td></tr>';
         }
         return;
       }
@@ -430,11 +478,17 @@
       const snap = ev.has_snapshot ? '📷' : '';
 
       const labelHtml = `<span style="color:${ev.color || '#c0c5d1'}">${ev.display_label || ev.label}</span>`;
+      const desc = ev.description || '';
+      const descEsc = desc.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+      const descHtml = desc
+        ? `<span class="text-[#9ca3af] italic block max-w-md truncate" title="${descEsc}">${descEsc}</span>`
+        : '<span class="text-[#4b5563]">—</span>';
 
       tr.innerHTML = `
         <td class="font-mono text-[#6b7280] whitespace-nowrap min-w-24">${ts}</td>
         <td>${ev.camera}</td>
-        <td>${labelHtml}${ev.description ? `<br><span style="font-size:9px;color:#6b7280;max-width:180px;display:inline-block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${ev.description.replace(/"/g,'&quot;')}">${ev.description}</span>` : ''}</td>
+        <td>${labelHtml}</td>
+        <td class="max-w-md">${descHtml}</td>
         <td class="font-mono">${speed}</td>
         <td class="font-mono">${score}</td>
         <td class="font-mono">${dur}</td>
@@ -1015,10 +1069,51 @@
             'You can also change the poll interval live using the POLL input in the top summary bar.');
     }
 
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function renderModalAiSection(aiEl, ev, reviewGenai) {
+      const parts = [];
+      const objDesc = (ev && ev.description) ? String(ev.description).trim() : '';
+      if (objDesc) {
+        parts.push(
+          '<div class="text-xs font-semibold text-[#a5b4fc] mb-1">Object description (GenAI)</div>' +
+          `<div class="text-sm text-[#d1d5db] whitespace-pre-wrap leading-relaxed">${escapeHtml(objDesc)}</div>`
+        );
+      }
+      if (reviewGenai) {
+        const title = reviewGenai.title ? escapeHtml(reviewGenai.title) : '';
+        const short = reviewGenai.shortSummary ? escapeHtml(reviewGenai.shortSummary) : '';
+        const scene = reviewGenai.scene ? escapeHtml(reviewGenai.scene) : '';
+        const threat = reviewGenai.potential_threat_level;
+        let block = '<div class="text-xs font-semibold text-[#a5b4fc] mb-1 mt-3">Review summary (GenAI)</div>';
+        if (title) block += `<div class="text-sm font-medium text-[#e5e7eb]">${title}</div>`;
+        if (short) block += `<div class="text-sm text-[#d1d5db] mt-1 whitespace-pre-wrap">${short}</div>`;
+        else if (scene) block += `<div class="text-sm text-[#d1d5db] mt-1 whitespace-pre-wrap leading-relaxed">${scene}</div>`;
+        if (threat != null && threat > 0) {
+          block += `<div class="text-xs text-amber-400 mt-1">Threat level: ${threat}</div>`;
+        }
+        parts.push(block);
+      }
+      if (!parts.length) {
+        aiEl.classList.add('hidden');
+        aiEl.innerHTML = '';
+        return;
+      }
+      aiEl.classList.remove('hidden');
+      aiEl.innerHTML = parts.join('');
+    }
+
     function showEventModal(ev) {
       const modal = document.getElementById('modal');
       const title = document.getElementById('modal-title');
       const body = document.getElementById('modal-body');
+      const aiEl = document.getElementById('modal-ai');
       const media = document.getElementById('modal-media');
 
       title.textContent = `${ev.camera} — ${ev.display_label || ev.label} @ ${new Date(ev.start_time*1000).toLocaleTimeString()}`;
@@ -1026,20 +1121,16 @@
         <div>Score: ${ev.top_score != null ? ev.top_score.toFixed(2) : '—'} &nbsp; Duration: ${ev.duration_s ? ev.duration_s.toFixed(1)+'s' : '—'}</div>
         <div>Zones: ${(ev.zones||[]).join(', ') || '—'}</div>
         <div>Speed: ${ev.average_estimated_speed != null && ev.average_estimated_speed !== 0 ? ev.average_estimated_speed.toFixed(1) : '—'} ${ev.velocity_angle != null ? ' @ ' + ev.velocity_angle.toFixed(0) + '°' : ''}</div>
-        ${ev.description ? `<div style="margin-top:4px"><strong>LLM description:</strong> ${ev.description}</div>` : ''}
       `;
 
-      media.innerHTML = '';
-      // Media is now proxied through the web server (/api/snapshot, /api/clip)
-      // so the browser never needs a direct route to Frigate. This works even when
-      // the server reaches Frigate via localhost / Docker networking but the browser
-      // cannot.
+      aiEl.classList.remove('hidden');
+      aiEl.innerHTML = '<div class="text-xs text-[#6b7280]">Loading AI description…</div>';
 
+      media.innerHTML = '';
       if (ev.has_snapshot) {
         const img = document.createElement('img');
-        // Request with bbox=1 so the detected object box is drawn (more useful than raw frame)
         img.src = `/api/snapshot/${ev.id}?bbox=1`;
-        img.className = 'max-h-64 rounded border border-[#4a5263]';
+        img.className = 'max-w-full max-h-[min(50vh,420px)] rounded border border-[#4a5263]';
         img.onerror = () => { img.alt = 'Snapshot not available (may have expired, not recorded, or an error occurred)'; };
         media.appendChild(img);
       }
@@ -1057,12 +1148,170 @@
 
       modal.classList.remove('hidden');
       modal.classList.add('flex');
+
+      fetch(`/api/event/${encodeURIComponent(ev.id)}`)
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+          if (!data || !data.ok) {
+            if (!ev.description) {
+              aiEl.classList.remove('hidden');
+              aiEl.innerHTML = '<div class="text-xs text-[#6b7280]">No AI description for this event.</div>';
+            }
+            return;
+          }
+          const fresh = data.event || ev;
+          if (fresh.description) ev.description = fresh.description;
+          if (fresh.has_snapshot != null) ev.has_snapshot = fresh.has_snapshot;
+          renderModalAiSection(aiEl, fresh, data.review_genai || null);
+        })
+        .catch(() => {
+          renderModalAiSection(aiEl, ev, null);
+        });
     }
 
     function hideModal() {
       const modal = document.getElementById('modal');
       modal.classList.add('hidden');
       modal.classList.remove('flex');
+    }
+
+    function genaiHoursValue() {
+      const sel = document.getElementById('genai-hours');
+      return sel ? parseFloat(sel.value) || 1 : 1;
+    }
+
+    function renderGenaiSections(sections) {
+      const container = document.getElementById('genai-hours-container');
+      if (!container) return;
+      if (!sections || !sections.length) {
+        container.innerHTML = '<div class="text-[#6b7280]">No GenAI messages in this time window yet. They appear when Frigate generates review summaries or object descriptions.</div>';
+        return;
+      }
+      container.innerHTML = sections.map(sec => {
+        const msgs = (sec.messages || []).map(m => {
+          const kind = m.kind === 'review' ? 'Review' : 'Object';
+          const title = m.title ? `<span class="text-[#e5e7eb] font-medium">${escapeHtml(m.title)}</span>` : '';
+          const threat = (m.threat != null && m.threat > 0) ? `<span class="text-amber-400 ml-1">threat ${m.threat}</span>` : '';
+          const text = m.text ? `<div class="text-[#9ca3af] mt-px">${escapeHtml(m.text)}</div>` : '';
+          const head = `${title ? title + ' · ' : ''}<span class="text-[#a5b4fc]">${kind}</span> <span class="text-[#6b7280]">@</span> ${escapeHtml(m.camera)}${threat}`;
+          return `<div class="genai-msg">
+            <div><span class="font-mono text-[#6b7280]">${escapeHtml(m.time || '')}</span> ${head}</div>
+            ${text}
+          </div>`;
+        }).join('');
+        const label = escapeHtml(sec.hour_label || sec.hour);
+        return `<div class="rounded border border-[#4a5263] bg-[#161b26] genai-hour-card">
+          <div class="font-semibold text-[#a5b4fc] text-xs mb-1">${label} <span class="text-[#6b7280] font-normal">(${sec.count})</span></div>
+          ${msgs}
+        </div>`;
+      }).join('');
+    }
+
+    function formatGenaiMarkdownInline(s) {
+      let t = escapeHtml(s);
+      t = t.replace(/\*\*(.+?)\*\*/g, '<strong class="text-[#e5e7eb] font-medium">$1</strong>');
+      t = t.replace(/__(.+?)__/g, '<strong class="text-[#e5e7eb] font-medium">$1</strong>');
+      t = t.replace(/\*([^*]+)\*/g, '<em class="text-[#b8bcc8]">$1</em>');
+      t = t.replace(/`([^`]+)`/g, '<code class="text-[#a5b4fc] text-[10px]">$1</code>');
+      return t;
+    }
+
+    function formatGenaiMarkdown(raw) {
+      const lines = String(raw || '').replace(/\r\n/g, '\n').split('\n');
+      const out = [];
+      let inList = false;
+
+      const closeList = () => {
+        if (inList) { out.push('</ul>'); inList = false; }
+      };
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          closeList();
+          continue;
+        }
+        let m;
+        if ((m = trimmed.match(/^#{1,3}\s+(.+)$/))) {
+          closeList();
+          const title = formatGenaiMarkdownInline(m[1]);
+          const hashes = trimmed.match(/^(#+)/)[1].length;
+          if (hashes === 1) {
+            out.push(`<h2 class="genai-md-h genai-md-h-top">${title}</h2>`);
+          } else if (hashes === 2) {
+            out.push(`<h3 class="genai-md-h">${title}</h3>`);
+          } else {
+            out.push(`<h4 class="genai-md-h" style="border-top:none;padding-top:0;margin-top:0.25rem">${title}</h4>`);
+          }
+        } else if ((m = trimmed.match(/^[-*•]\s+(.+)$/)) || (m = trimmed.match(/^\d+\.\s+(.+)$/))) {
+          if (!inList) { out.push('<ul class="genai-md-ul">'); inList = true; }
+          out.push(`<li>${formatGenaiMarkdownInline(m[1])}</li>`);
+        } else {
+          closeList();
+          out.push(`<p class="genai-md-p">${formatGenaiMarkdownInline(trimmed)}</p>`);
+        }
+      }
+      closeList();
+      return out.join('');
+    }
+
+    function renderGenaiReportMarkdown(text) {
+      const panel = document.getElementById('genai-report-panel');
+      const el = document.getElementById('genai-report-text');
+      if (!panel || !el) return;
+      if (!text) {
+        panel.classList.add('hidden');
+        el.innerHTML = '';
+        return;
+      }
+      panel.classList.remove('hidden');
+      el.innerHTML = formatGenaiMarkdown(text);
+    }
+
+    async function loadGenaiActivity() {
+      const status = document.getElementById('genai-status');
+      const hrs = genaiHoursValue();
+      if (status) status.textContent = 'Loading messages…';
+      try {
+        const r = await fetch(`/api/genai/activity?hours=${hrs}`);
+        const data = await r.json();
+        if (!data.ok) throw new Error(data.error || 'Failed');
+        renderGenaiSections(data.sections || []);
+        if (status) status.textContent = `${data.total || 0} GenAI message(s) in last ${hrs}h`;
+      } catch (e) {
+        if (status) status.textContent = 'Error loading messages';
+        renderGenaiSections([]);
+      }
+    }
+
+    async function generateGenaiReport() {
+      const status = document.getElementById('genai-status');
+      const btn = document.getElementById('genai-generate-btn');
+      const hrs = genaiHoursValue();
+      if (status) status.textContent = 'Calling LLM (may take 1–3 min)…';
+      if (btn) btn.disabled = true;
+      try {
+        const r = await fetch('/api/genai/report', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hours: hrs }),
+        });
+        const data = await r.json();
+        renderGenaiSections(data.sections || []);
+        if (data.ok && data.report) {
+          renderGenaiReportMarkdown(data.report);
+          const n = (data.sections || []).reduce((a, s) => a + (s.count || 0), 0);
+          const model = data.llm ? data.llm.model : '';
+          if (status) status.textContent = `Report generated (${n} messages${model ? ', ' + model : ''})`;
+        } else {
+          renderGenaiReportMarkdown('');
+          if (status) status.textContent = data.error || 'Report failed';
+        }
+      } catch (e) {
+        if (status) status.textContent = 'Report request failed';
+      } finally {
+        if (btn) btn.disabled = false;
+      }
     }
 
     // Keyboard support (parity with TUI where sensible)
@@ -1075,6 +1324,7 @@
         if (e.key === '2') { switchTab('cameras'); e.preventDefault(); }
         if (e.key === '3') { switchTab('events'); e.preventDefault(); }
         if (e.key === '4') { switchTab('health'); e.preventDefault(); }
+        if (e.key === '5') { switchTab('genai'); e.preventDefault(); }
         if (e.key.toLowerCase() === 'escape') { hideModal(); }
       });
     }

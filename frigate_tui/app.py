@@ -32,6 +32,17 @@ except ImportError:
     FrigateMqttClient = None  # type: ignore
     MQTT_AVAILABLE = False
 
+_EVENT_DESC_MAX_LEN = 72
+
+
+def _format_event_description(description: str | None) -> str:
+    if not description:
+        return "—"
+    d = description.strip()
+    if len(d) <= _EVENT_DESC_MAX_LEN:
+        return d
+    return d[: _EVENT_DESC_MAX_LEN - 1] + "…"
+
 
 # ------------------------------------------------------------------
 # Widgets
@@ -350,6 +361,7 @@ class FrigateMonitor(App[None]):
             ("time", "Time"),
             ("camera", "Camera"),
             ("label", "Label / Person"),
+            ("ai_desc", "AI Description"),
             ("speed", "Speed"),
             ("score", "Score"),
             ("dur", "Dur"),
@@ -588,10 +600,15 @@ class FrigateMonitor(App[None]):
                     display_label = ev.display_label
                     label_cell = Text(display_label, style=label_color(ev.label))
                     speed_str = f"{ev.average_estimated_speed:.1f}" if ev.average_estimated_speed else "—"
+                    desc_cell = Text(
+                        _format_event_description(ev.description),
+                        style="italic #9ca3af" if ev.description else "dim",
+                    )
                     table.add_row(
                         ts,
                         ev.camera,
                         label_cell,
+                        desc_cell,
                         speed_str,
                         f"{ev.top_score:.2f}" if ev.top_score else "—",
                         dur,
@@ -612,8 +629,13 @@ class FrigateMonitor(App[None]):
                         display_label = ev.display_label
                         label_cell = Text(display_label, style=label_color(ev.label))
                         speed_str = f"{ev.average_estimated_speed:.1f}" if ev.average_estimated_speed else "—"
+                        desc_cell = Text(
+                            _format_event_description(ev.description),
+                            style="italic #9ca3af" if ev.description else "dim",
+                        )
                         row_key = ev.id
                         table.update_cell(row_key, "label", label_cell)
+                        table.update_cell(row_key, "ai_desc", desc_cell)
                         table.update_cell(row_key, "speed", speed_str)
                         table.update_cell(row_key, "score", f"{ev.top_score:.2f}" if ev.top_score else "—")
                         table.update_cell(row_key, "dur", dur)

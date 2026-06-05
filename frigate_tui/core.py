@@ -20,6 +20,8 @@ from typing import Any, Callable, Awaitable
 
 from frigate_tui import __version__
 from frigate_tui.api import FrigateClient
+from frigate_tui.genai_activity import group_by_hour, make_activity_record
+from frigate_tui.genai_report import generate_activity_report, resolve_llm_settings
 from frigate_tui.models import (
     CameraStats,
     FrigateEvent,
@@ -29,6 +31,8 @@ from frigate_tui.models import (
     compute_health,
     parse_cameras,
     frigate_event_from_dict,
+    frigate_event_from_mqtt_payload,
+    genai_summary_from_review_data,
     review_item_from_dict,
     timeline_entry_from_dict,
 )
@@ -61,7 +65,21 @@ class FrigateMonitorCore:
         self.review_interval: float = float(s.get("review_interval", 8.0))
         self.timeline_interval: float = float(s.get("timeline_interval", 5.0))
         self.stats_log_interval: float = float(s.get("stats_log_interval", 600.0))
+        self.events_poll_interval: float = float(s.get("events_poll_interval", 8.0))
+        self.events_reconcile_interval: float = float(s.get("events_reconcile_interval", 10.0))
         self.max_events: int = int(s.get("max_events", 150))
+        # Activity Log: timeline can flood the log (visible/stationary/gone per object)
+        self.timeline_log_enabled: bool = bool(s.get("timeline_log_enabled", True))
+        self.timeline_log_stationary: bool = bool(s.get("timeline_log_stationary", False))
+        self.timeline_log_gone_min_score: float = float(s.get("timeline_log_gone_min_score", 0.80))
+        self.timeline_log_visible_min_score: float = float(
+            s.get("timeline_log_visible_min_score", 0.85)
+        )
+        self.genai_report_config: dict[str, Any] = dict(s.get("genai_report") or {})
+        self._genai_activity_hours_keep: float = float(
+            s.get("genai_activity_hours_keep", 48.0)
+        )
+        self._max_genai_activity: int = int(s.get("genai_activity_max", 1500))
         self.tui_version = __version__
         self.demo: bool = bool(s.get("demo", False))
 
@@ -94,6 +112,9 @@ class FrigateMonitorCore:
 
         # Track event ids for which we've already logged an LLM/GenAI description
         self._logged_llm_descriptions: set[str] = set()
+        self._timeline_reconcile_task: asyncio.Task | None = None
+        self.genai_activity: list[dict[str, Any]] = []
+        self._genai_activity_keys: set[str] = set()
 
         # Canonical live state (source of truth for TUI + web)
         self.last_stats: dict[str, Any] | None = None
@@ -159,6 +180,45 @@ class FrigateMonitorCore:
     def frigate_version(self) -> str:
         return self._frigate_version
 
+    @staticmethod
+    def event_to_dict(e: FrigateEvent) -> dict[str, Any]:
+        """JSON-friendly event for web modal / API."""
+        d = asdict(e)
+        d["color"] = e.color
+        d["display_label"] = e.display_label
+        d["duration_s"] = e.duration_s
+        return d
+
+    async def fetch_event_detail(self, event_id: str) -> dict[str, Any] | None:
+        """Load latest event fields from Frigate plus any GenAI review tied to this event id."""
+        if self.demo:
+            for e in self.recent_events:
+                if e.id == event_id:
+                    return {"event": self.event_to_dict(e), "review_genai": None}
+            return None
+        if not self._client:
+            return None
+        try:
+            raw = await self._client.get_event(event_id)
+            if not raw:
+                return None
+            fe = frigate_event_from_dict(raw)
+            if fe is None:
+                return None
+            review_genai: dict[str, Any] | None = None
+            try:
+                for r in await self._client.get_review_items(limit=50):
+                    dets = (r.get("data") or {}).get("detections") or []
+                    if event_id in dets:
+                        review_genai = genai_summary_from_review_data(r.get("data") or {})
+                        if review_genai:
+                            break
+            except Exception:
+                pass
+            return {"event": self.event_to_dict(fe), "review_genai": review_genai}
+        except Exception:
+            return None
+
     def get_snapshot(self) -> dict[str, Any]:
         """Return a JSON-serializable snapshot suitable for web initial state or debug."""
         # Convert dataclasses to plain dicts for transport
@@ -169,13 +229,7 @@ class FrigateMonitorCore:
             return d
 
         def _evt(e: FrigateEvent) -> dict[str, Any]:
-            d = asdict(e)
-            d["color"] = e.color
-            d["display_label"] = e.display_label
-            d["duration_s"] = e.duration_s
-            if e.description:
-                d["description"] = e.description
-            return d
+            return self.event_to_dict(e)
 
         def _health(h: SystemHealth | None) -> dict[str, Any] | None:
             if not h:
@@ -246,6 +300,7 @@ class FrigateMonitorCore:
         else:
             await self._load_initial_events()
             await self._load_initial_timeline()
+            await self._backfill_genai_activity()
 
         # Always poll stats
         self._tasks.append(
@@ -256,17 +311,32 @@ class FrigateMonitorCore:
         if self.mqtt_config and not MQTT_AVAILABLE:
             self.add_log("MQTT configured but aiomqtt not installed — falling back to polling", "warning")
 
+        # HTTP /api/events poll runs alongside MQTT. Timeline & review lines can be minutes
+        # ahead of frigate/events; polling keeps the Events tab close to the Activity Log.
+        if not self.demo:
+            self._tasks.append(
+                asyncio.create_task(
+                    self._interval_loop(
+                        "events",
+                        lambda: self.events_poll_interval,
+                        self._refresh_events,
+                    )
+                )
+            )
+            self._event_polling_active = True
+
         if self._use_mqtt_for_events and self.mqtt_config:
             self._mqtt_task = asyncio.create_task(self._run_mqtt_listener())
             self._tasks.append(self._mqtt_task)
-            self.add_log("MQTT event subscription enabled", "info")
-        else:
-            ev_get = lambda: max(2.0, self.poll_interval * 2)
-            self._tasks.append(
-                asyncio.create_task(self._interval_loop("events", ev_get, self._refresh_events))
+            self.add_log(
+                f"MQTT event subscription enabled; Events table also refreshed via HTTP every {self.events_poll_interval:.0f}s",
+                "info",
             )
-            self._event_polling_active = True
-            self.add_log("Event polling started (MQTT not configured). Stats logged every ~10s.", "info")
+        elif not self.demo:
+            self.add_log(
+                f"Event polling every {self.events_poll_interval:.0f}s (MQTT not configured)",
+                "info",
+            )
 
         self._log_genai_monitoring_mode()
 
@@ -278,9 +348,23 @@ class FrigateMonitorCore:
         self._tasks.append(
             asyncio.create_task(self._interval_loop("timeline", lambda: self.timeline_interval, self._refresh_timeline))
         )
+        # HTTP reconciliation keeps the Events table current when MQTT misses events
+        # (GenAI tracked_object_update can still flow while frigate/events does not).
+        if not self.demo:
+            self._tasks.append(
+                asyncio.create_task(
+                    self._interval_loop(
+                        "events_reconcile",
+                        lambda: self.events_reconcile_interval,
+                        self._reconcile_events,
+                    )
+                )
+            )
 
         # Prime stats immediately
         await self._refresh_stats()
+        if not self.demo:
+            await self._reconcile_events()
 
     async def stop(self) -> None:
         self._running = False
@@ -388,6 +472,214 @@ class FrigateMonitorCore:
                 "info",
             )
 
+    @staticmethod
+    def _truncate_log_text(text: str, max_len: int = 100) -> str:
+        text = str(text).strip()
+        if len(text) <= max_len:
+            return text
+        cut = text[:max_len]
+        if " " in cut:
+            cut = cut.rsplit(" ", 1)[0]
+        return cut.rstrip(".,;:") + "…"
+
+    def _should_log_timeline_entry(self, entry: TimelineEntry) -> bool:
+        """Filter timeline rows so GenAI/review lines stay readable in the Activity Log."""
+        if not self.timeline_log_enabled:
+            return False
+        score = float(entry.score or 0)
+        if entry.class_type == "stationary":
+            return self.timeline_log_stationary
+        if entry.class_type == "gone":
+            if entry.sub_label:
+                return score >= self.timeline_log_gone_min_score
+            return score > 0.85
+        if entry.class_type in ("visible", "active"):
+            if entry.sub_label:
+                return True
+            return score >= self.timeline_log_visible_min_score or score > 0.85
+        return entry.sub_label or score > 0.85
+
+    def _record_genai_activity(
+        self,
+        *,
+        kind: str,
+        camera: str,
+        title: str = "",
+        text: str = "",
+        threat: int | float | None = None,
+        ref_id: str = "",
+        ts: float | None = None,
+    ) -> None:
+        """Store structured GenAI output for the Activity Report tab (deduped by kind+ref_id)."""
+        if not ref_id:
+            return
+        key = f"{kind}:{ref_id}"
+        if key in self._genai_activity_keys:
+            return
+        record = make_activity_record(
+            kind=kind,
+            camera=camera,
+            title=title,
+            text=text,
+            threat=threat,
+            ref_id=ref_id,
+            ts=ts,
+        )
+        self._genai_activity_keys.add(key)
+        self.genai_activity.append(record)
+        self._prune_genai_activity()
+
+    def _prune_genai_activity(self) -> None:
+        import time
+
+        cutoff = time.time() - self._genai_activity_hours_keep * 3600.0
+        self.genai_activity = [e for e in self.genai_activity if float(e.get("ts", 0)) >= cutoff]
+        if len(self.genai_activity) > self._max_genai_activity:
+            self.genai_activity = self.genai_activity[-self._max_genai_activity :]
+        self._genai_activity_keys = {
+            f"{e['kind']}:{e['ref_id']}" for e in self.genai_activity if e.get("ref_id")
+        }
+
+    def get_genai_sections(self, hours: float = 1.0) -> list[dict[str, Any]]:
+        return group_by_hour(self.genai_activity, hours)
+
+    async def generate_genai_report(self, hours: float = 1.0) -> dict[str, Any]:
+        """Build hourly sections and ask the configured LLM for a narrative report."""
+        sections = self.get_genai_sections(hours)
+        if self.demo:
+            report = (
+                "## Overall\n\n"
+                "Demo mode sample: one person approached the driveway; routine vehicle traffic "
+                "on the back deck; a dog was visible near the front porch.\n\n"
+            )
+            for sec in sections:
+                report += f"## Hour {sec['hour_label']}\n\n"
+                report += (
+                    f"{sec['count']} GenAI message(s) on cameras "
+                    f"{', '.join(sorted({m['camera'] for m in sec['messages']}))}.\n\n"
+                )
+            return {
+                "ok": True,
+                "demo": True,
+                "hours": hours,
+                "sections": sections,
+                "report": report.strip(),
+                "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            }
+        if not sections:
+            return {
+                "ok": False,
+                "error": "No GenAI messages in the selected time window.",
+                "hours": hours,
+                "sections": [],
+                "report": None,
+            }
+
+        frigate_cfg: dict[str, Any] | None = None
+        if self._client and not self.demo:
+            try:
+                frigate_cfg = await self._client.get_config()
+            except Exception:
+                pass
+
+        llm = resolve_llm_settings(self.genai_report_config, frigate_cfg)
+        if not llm:
+            return {
+                "ok": False,
+                "error": "No LLM configured. Add genai_report.base_url and model to config.yaml "
+                "(or ensure Frigate config has genai.provider settings).",
+                "hours": hours,
+                "sections": sections,
+                "report": None,
+            }
+
+        timeout = float(self.genai_report_config.get("timeout", 180))
+        report, err = await generate_activity_report(
+            base_url=llm["base_url"],
+            model=llm["model"],
+            sections=sections,
+            hours=hours,
+            timeout=timeout,
+        )
+        if err:
+            return {
+                "ok": False,
+                "error": err,
+                "hours": hours,
+                "sections": sections,
+                "report": None,
+                "llm": llm,
+            }
+        return {
+            "ok": True,
+            "hours": hours,
+            "sections": sections,
+            "report": report,
+            "llm": llm,
+            "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+
+    async def _backfill_genai_activity(self) -> None:
+        """Seed history from recent Frigate reviews that already have GenAI metadata."""
+        if self.demo or not self._client:
+            return
+        import time
+
+        cutoff = time.time() - self._genai_activity_hours_keep * 3600.0
+        try:
+            reviews = await self._client.get_review_items(limit=100)
+            added = 0
+            for raw in reviews:
+                rev = review_item_from_dict(raw)
+                if rev is None or not rev.genai_summary or not rev.id:
+                    continue
+                if rev.start_time < cutoff:
+                    continue
+                g = rev.genai_summary
+                text = str(g.get("shortSummary") or g.get("scene") or "").strip()
+                self._record_genai_activity(
+                    kind="review",
+                    camera=rev.camera,
+                    title=str(g.get("title") or ""),
+                    text=text,
+                    threat=g.get("potential_threat_level"),
+                    ref_id=rev.id,
+                    ts=rev.start_time,
+                )
+                added += 1
+            if added:
+                self.add_log(f"GenAI report: loaded {added} review summaries from Frigate history", "info")
+        except Exception as e:
+            self.add_log(f"GenAI history backfill error: {e}", "warning")
+
+    def _log_review_genai_summary(self, rev: ReviewItem) -> None:
+        """Log Frigate GenAI review summary (title + shortSummary) once per review id."""
+        if not rev.genai_summary or not rev.id or rev.id in self._logged_review_genai_ids:
+            return
+        g = rev.genai_summary
+        title = g.get("title", "")
+        short = g.get("shortSummary", "")
+        threat = g.get("potential_threat_level")
+        text = str(short or g.get("scene") or "").strip()
+        self._record_genai_activity(
+            kind="review",
+            camera=rev.camera,
+            title=str(title or ""),
+            text=text,
+            threat=threat,
+            ref_id=rev.id,
+            ts=rev.start_time,
+        )
+        msg = f"GenAI [review]: {rev.camera}"
+        if title:
+            msg += f" — {title}"
+        if short:
+            msg += f" — {self._truncate_log_text(short)}"
+        if threat is not None and threat > 0:
+            msg += f" [threat={threat}]"
+        self.add_log(msg, "info")
+        self._logged_review_genai_ids.add(rev.id)
+
     def _log_llm_description(
         self,
         event: FrigateEvent,
@@ -400,6 +692,14 @@ class FrigateMonitorCore:
         label = event.display_label or event.label
         prefix = "LLM (demo)" if demo else "LLM"
         via = f" [{source}]" if source else ""
+        self._record_genai_activity(
+            kind="object",
+            camera=event.camera,
+            title=label,
+            text=str(event.description),
+            ref_id=event.id,
+            ts=event.start_time,
+        )
         self.add_log(
             f"{prefix}{via}: Description for {label} on {event.camera} — {event.description[:180]}",
             "info",
@@ -534,43 +834,112 @@ class FrigateMonitorCore:
     # Events (initial + poll + MQTT with identical merge/ordering/dedup)
     # ------------------------------------------------------------------
 
-    async def _refresh_events(self) -> None:
-        if getattr(self, "_use_mqtt_for_events", False) and not getattr(self, "_event_polling_active", False):
+    def _events_signature(self, events: list[FrigateEvent]) -> tuple[Any, ...]:
+        return tuple(
+            (e.id, e.start_time, e.end_time, e.description, e.top_score, e.has_clip, e.has_snapshot)
+            for e in events
+        )
+
+    def _merge_events(
+        self,
+        incoming: list[FrigateEvent],
+        *,
+        log_new: bool = False,
+        log_prefix: str = "New event",
+        llm_source: str = "",
+    ) -> bool:
+        """Merge events into recent_events; notify listeners when the list changes."""
+        if not incoming:
+            return False
+
+        old_ids = {e.id for e in self.recent_events}
+        for fe in incoming:
+            if fe.start_time > (self._last_event_ts or 0):
+                self._last_event_ts = fe.start_time
+            if llm_source:
+                self._log_llm_description(fe, source=llm_source)
+
+        combined = incoming + self.recent_events
+        merged = sorted(
+            {e.id: e for e in combined}.values(), key=lambda x: x.start_time, reverse=True
+        )[: self.max_events]
+
+        if self._events_signature(merged) == self._events_signature(self.recent_events):
+            return False
+
+        new_only = [e for e in incoming if e.id not in old_ids]
+        self.recent_events = merged
+        self._notify("events", self.recent_events)
+
+        if log_new and new_only:
+            for ev in new_only[:3]:
+                self.add_log(f"{log_prefix}: {ev.display_label} on {ev.camera}", "success")
+            if len(new_only) > 3:
+                self.add_log(f"+{len(new_only)-3} more events", "info")
+        return True
+
+    async def _reconcile_events(self) -> None:
+        """Refresh the event list from /api/events (no 'after' cursor) to heal MQTT gaps."""
+        if self.demo or not self._client:
             return
+        try:
+            assert self._client is not None
+            limit = min(80, self.max_events)
+            events_raw = await self._client.get_events(limit=limit)
+            if not events_raw:
+                return
+
+            loaded: list[FrigateEvent] = []
+            for e in events_raw:
+                fe = frigate_event_from_dict(e)
+                if fe is not None:
+                    loaded.append(fe)
+
+            old_ids = {e.id for e in self.recent_events}
+            if self._merge_events(loaded, llm_source="reconcile"):
+                added = [e for e in loaded if e.id not in old_ids]
+                if added:
+                    newest = max(e.start_time for e in added)
+                    self.add_log(
+                        f"Events table updated from API (+{len(added)}; newest {datetime.fromtimestamp(newest, tz=timezone.utc).astimezone().strftime('%H:%M:%S')})",
+                        "info",
+                    )
+        except Exception as e:
+            self.add_log(f"Events reconcile error: {e}", "warning")
+
+    def _schedule_timeline_reconcile(self) -> None:
+        """After timeline activity, refresh /api/events (Frigate often lags timeline in the API)."""
+        if self.demo or not self._client:
+            return
+        if self._timeline_reconcile_task and not self._timeline_reconcile_task.done():
+            return
+
+        async def _run() -> None:
+            await asyncio.sleep(3.0)
+            await self._reconcile_events()
+
+        self._timeline_reconcile_task = asyncio.create_task(_run())
+
+    async def _refresh_events(self) -> None:
         if self.demo:
             return
         try:
             assert self._client is not None
-            events_raw = await self._client.get_events(limit=25, after=self._last_event_ts)
+            # Overlap the cursor so events missed by MQTT or equal start_time still appear.
+            after: float | None = None
+            if self._last_event_ts:
+                after = max(0.0, self._last_event_ts - 120.0)
+            events_raw = await self._client.get_events(limit=50, after=after)
             if not events_raw:
                 return
 
             new_events: list[FrigateEvent] = []
             for e in events_raw:
                 fe = frigate_event_from_dict(e)
-                if fe is None:
-                    continue
-                new_events.append(fe)
-                if fe.start_time > (self._last_event_ts or 0):
-                    self._last_event_ts = fe.start_time
+                if fe is not None:
+                    new_events.append(fe)
 
-                # Capture LLM/GenAI descriptions that arrive via polling (e.g. generated after the initial event)
-                self._log_llm_description(fe, source="poll")
-
-            if new_events:
-                combined = new_events + self.recent_events
-                self.recent_events = sorted(
-                    {e.id: e for e in combined}.values(), key=lambda x: x.start_time, reverse=True
-                )[: self.max_events]
-
-                self._notify("events", self.recent_events)
-
-                for ev in new_events[:3]:
-                    self.add_log(f"New event: {ev.display_label} on {ev.camera}", "success")
-                if len(new_events) > 3:
-                    self.add_log(f"+{len(new_events)-3} more events", "info")
-
-                # Catch LLM descriptions that may have been added to existing recent events (polling path)
+            if self._merge_events(new_events, log_new=True, llm_source="poll"):
                 for e in self.recent_events:
                     self._log_llm_description(e, source="poll")
         except Exception as e:
@@ -621,6 +990,10 @@ class FrigateMonitorCore:
                 rev = review_item_from_dict(r)
                 if rev is None:
                     continue
+
+                # GenAI summaries often arrive after the alert line — check every poll, not only "new" reviews
+                self._log_review_genai_summary(rev)
+
                 start = rev.start_time
                 if self._last_review_ts and start <= self._last_review_ts:
                     continue
@@ -640,22 +1013,6 @@ class FrigateMonitorCore:
                     self.add_log(msg, "warning" if rev.severity == "alert" else "info")
                     if rev.id:
                         self._logged_review_ids.add(rev.id)
-
-                # Log LLM/GenAI review summary (structured title + shortSummary from Frigate GenAI)
-                if getattr(rev, "genai_summary", None) and rev.id and rev.id not in self._logged_review_genai_ids:
-                    g = rev.genai_summary
-                    title = g.get("title", "")
-                    short = g.get("shortSummary", "")
-                    scene = g.get("scene", "")
-                    msg = f"LLM [review]: Summary for {rev.camera}"
-                    if title:
-                        msg += f" — {title}"
-                    if short:
-                        msg += f" ({short[:120]})"
-                    elif scene:
-                        msg += f" ({str(scene)[:120]})"
-                    self.add_log(msg, "info")
-                    self._logged_review_genai_ids.add(rev.id)
 
                 if start > (self._last_review_ts or 0):
                     self._last_review_ts = start
@@ -679,7 +1036,7 @@ class FrigateMonitorCore:
                 if self._last_timeline_ts and ts <= self._last_timeline_ts:
                     continue
                 if entry.class_type in ("visible", "gone", "stationary", "active"):
-                    if entry.sub_label or (entry.score or 0) > 0.85:
+                    if self._should_log_timeline_entry(entry):
                         self._log_timeline_entry(entry)
                 if ts > (self._last_timeline_ts or 0):
                     self._last_timeline_ts = ts
@@ -694,6 +1051,8 @@ class FrigateMonitorCore:
         msg = f"{entry.class_type.capitalize()}: {entry.label}{sub}{score_str}{attr}{zone} on {entry.camera}"
         level = "info" if entry.class_type == "visible" else ("warning" if entry.class_type == "stationary" else "dim")
         self.add_log(msg, level)
+        if entry.class_type in ("visible", "active"):
+            self._schedule_timeline_reconcile()
 
     async def _load_initial_timeline(self) -> None:
         if self.demo or not self._client:
@@ -717,8 +1076,8 @@ class FrigateMonitorCore:
                 all_interesting = [
                     e
                     for e in sorted(loaded, key=lambda x: x.timestamp, reverse=True)
-                    if e.class_type in ("visible", "gone", "stationary")
-                    and (e.sub_label or (e.score or 0) > 0.8)
+                    if e.class_type in ("visible", "gone", "stationary", "active")
+                    and self._should_log_timeline_entry(e)
                 ]
                 to_surface = all_interesting[:3]
                 for entry in reversed(to_surface):
@@ -758,7 +1117,8 @@ class FrigateMonitorCore:
                 connected = await self._mqtt_client.wait_until_connected(timeout=8.0)
                 if connected:
                     self.add_log(
-                        "MQTT connected — events + GenAI description updates (tracked_object_update) in real time",
+                        "MQTT connected — events, GenAI object descriptions (tracked_object_update), "
+                        "and review summaries (reviews) in real time",
                         "success",
                     )
                 else:
@@ -769,41 +1129,18 @@ class FrigateMonitorCore:
                         continue
                     try:
                         topic = payload.get("_topic", "")
+                        if topic.endswith("/reviews") or topic == f"{topic_prefix}/reviews":
+                            self._handle_review_mqtt_update(payload)
+                            continue
                         if "tracked_object_update" in topic:
                             self._handle_genai_update(payload)
                             continue
 
-                        # Reconstruct using the same fallbacks as original for events
-                        raw = payload
-                        after = raw.get("after") or {}
-                        before = raw.get("before") or {}
-                        data = raw.get("data") or after.get("data") or before.get("data") or {}
-
-                        # Prefer the already-normalized fields, fall back to raw
-                        # (use payload directly since we no longer have FrigateMqttEvent wrapper here)
-                        fe = FrigateEvent(
-                            id=payload.get("id") or after.get("id") or before.get("id") or raw.get("id", ""),
-                            camera=payload.get("camera") or after.get("camera") or before.get("camera", "unknown"),
-                            label=payload.get("label") or after.get("label") or before.get("label", "object"),
-                            start_time=float((payload.get("start_time") or after.get("start_time") or before.get("start_time") or 0)),
-                            end_time=float(payload.get("end_time") or after.get("end_time") or before.get("end_time") or 0) or None,
-                            top_score=payload.get("top_score") or after.get("top_score") or before.get("top_score"),
-                            has_snapshot=bool(payload.get("has_snapshot") or after.get("has_snapshot") or before.get("has_snapshot")),
-                            has_clip=bool(payload.get("has_clip") or after.get("has_clip") or before.get("has_clip")),
-                            zones=(payload.get("zones") or after.get("zones") or before.get("zones") or []),
-                            sub_label=raw.get("sub_label") or after.get("sub_label") or before.get("sub_label"),
-                            average_estimated_speed=data.get("average_estimated_speed"),
-                            velocity_angle=data.get("velocity_angle"),
-                            attributes=data.get("attributes") or [],
-                            description=raw.get("description") or after.get("description") or data.get("description"),
-                        )
-
-                        if fe.start_time > (self._last_event_ts or 0):
-                            self._last_event_ts = fe.start_time
+                        fe = frigate_event_from_mqtt_payload(payload)
+                        if fe is None:
+                            continue
 
                         event_type = payload.get("type", "new")
-
-                        # Exact late-arrival guard from original
                         is_tracked = any(e.id == fe.id for e in self.recent_events)
                         if not is_tracked:
                             current_min_start = min(
@@ -812,36 +1149,15 @@ class FrigateMonitorCore:
                             if event_type != "new" and fe.start_time < current_min_start:
                                 continue
 
-                        # Exact insert/replace logic
-                        if event_type == "new" or not is_tracked:
-                            self.recent_events = [fe] + [
-                                e for e in self.recent_events if e.id != fe.id
-                            ][: self.max_events - 1]
-                        else:
-                            for i, e in enumerate(self.recent_events):
-                                if e.id == fe.id:
-                                    self.recent_events[i] = fe
-                                    break
-                            else:
-                                self.recent_events = [fe] + self.recent_events[: self.max_events - 1]
-
-                        # Canonical sort + cap (defensive, same as TUI)
-                        self.recent_events = sorted(
-                            {e.id: e for e in self.recent_events}.values(),
-                            key=lambda x: x.start_time,
-                            reverse=True,
-                        )[: self.max_events]
-
-                        self._notify("events", self.recent_events)
-
+                        changed = self._merge_events([fe], llm_source="mqtt-event")
                         label = fe.display_label
-                        if event_type == "new" or not is_tracked:
-                            self.add_log(f"New event (MQTT): {label} on {fe.camera}", "success")
+                        if changed:
+                            if event_type == "new" or not is_tracked:
+                                self.add_log(f"New event (MQTT): {label} on {fe.camera}", "success")
+                            elif event_type == "end":
+                                self.add_log(f"Event ended (MQTT): {label} on {fe.camera}", "info")
                         elif event_type == "end":
                             self.add_log(f"Event ended (MQTT): {label} on {fe.camera}", "info")
-
-                        # Log LLM/GenAI description if present in this event payload (for cases where it arrives with the event)
-                        self._log_llm_description(fe, source="mqtt-event")
                     except Exception as e:
                         self.add_log(f"MQTT event parse/render error: {e}", "warning")
                         continue
@@ -875,6 +1191,18 @@ class FrigateMonitorCore:
                     # For other errors, keep the original short fallback notice
                     self.add_log("MQTT failed — falling back to event polling", "warning")
 
+    def _handle_review_mqtt_update(self, payload: dict) -> None:
+        """Handle frigate/reviews MQTT when GenAI metadata is attached to a review."""
+        try:
+            after = payload.get("after") or {}
+            if not after:
+                return
+            rev = review_item_from_dict(after)
+            if rev:
+                self._log_review_genai_summary(rev)
+        except Exception as e:
+            self.add_log(f"GenAI review update parse error: {e}", "warning")
+
     def _handle_genai_update(self, payload: dict) -> None:
         """Handle Frigate tracked_object_update messages for GenAI/LLM activity (e.g. new descriptions)."""
         try:
@@ -887,6 +1215,13 @@ class FrigateMonitorCore:
             label = payload.get("label") or payload.get("after", {}).get("label", "object")
             desc = payload.get("description") or payload.get("after", {}).get("description", "")
             if desc:
+                self._record_genai_activity(
+                    kind="object",
+                    camera=camera,
+                    title=label,
+                    text=desc,
+                    ref_id=event_id,
+                )
                 self.add_log(f"LLM [mqtt]: Description for {label} on {camera} — {desc[:180]}", "info")
                 self._logged_llm_descriptions.add(event_id)
                 # Update any in-memory event so the web UI / TUI can show the description immediately
