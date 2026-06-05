@@ -23,110 +23,237 @@ Watch camera FPS, detector queues / pressure, GPU usage, incoming events, and sy
 
 ## Requirements
 
-- Python 3.10+
-- A running Frigate instance (0.13+ recommended) reachable over HTTP
-- Modern terminal (truecolor support recommended: Kitty, WezTerm, iTerm2, Windows Terminal, etc.) — for the TUI
-- For the **Web UI**: `pip install "frigate-tui[web]"` (pulls in FastAPI + Uvicorn)
+- **Frigate** 0.13+ (0.17+ for full GenAI metadata), reachable over HTTP from where you run frigate-tui
+- **Python 3.10+** — only if installing without Docker
+- **Modern terminal** with truecolor (TUI): Kitty, WezTerm, iTerm2, Windows Terminal, etc.
+- **MQTT broker** (recommended) — same one Frigate uses, for real-time events and GenAI description updates
+- **LLM endpoint** (optional) — Ollama or OpenAI-compatible API for the web **Summary** tab
 
 ## Quick Start
 
-```bash
-# Install (editable + dev tools for hot reload)
-pip install -e ".[dev]"
-
-# Run the TUI with live reload + debug console (F2)
-textual run --dev frigate_tui.app:FrigateMonitor
-
-# Or the installed command
-frigate-tui
-```
-
-### Web Dashboard
+Already have Frigate and Docker? See [Installation](#installation) for full steps. Short path:
 
 ```bash
-# Install with web extras
-pip install "frigate-tui[web]"
-
-# Run the web UI (default: http://0.0.0.0:8080 — accessible on your LAN)
-frigate-tui web
-
-# Demo mode (no Frigate needed)
-frigate-tui web --demo
-```
-
-The terminal will print the LAN-accessible URLs.
-
-Override the URL (same as TUI):
-
-```bash
-FRIGATE_TUI_URL=http://your-frigate-host:5000 frigate-tui web --port 8080
-```
-
-## Running with Docker (Simple "It Just Works" Mode)
-
-The compose file is configured so that this is usually all you need:
-
-```bash
-# Build once (or after code changes)
+git clone https://github.com/datagod/frigate-tui.git && cd frigate-tui
+cp config.example.yaml config.yaml   # edit frigate_url / mqtt / genai_report
 docker compose build
+docker compose --profile web up --build frigate-web   # browser UI on :8080
+# or: docker compose run --rm frigate-tui            # terminal UI
+```
 
-# Run the TUI
+## Installation
+
+This project can run as a **terminal UI (TUI)** or a **web dashboard**. Both use the same `config.yaml` and core logic. Pick one install method below.
+
+### 1. Get the project
+
+```bash
+git clone https://github.com/datagod/frigate-tui.git
+cd frigate-tui
+```
+
+Or download and unpack a release archive from GitHub.
+
+### 2. Configure
+
+Copy the example config and edit it for your environment:
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+**Minimum** — point at Frigate:
+
+```yaml
+frigate_url: "http://localhost:5000"   # or http://192.168.1.50:5000
+poll_interval: 1.0
+```
+
+**Recommended** — MQTT for real-time events and GenAI object descriptions in the Activity Log:
+
+```yaml
+mqtt:
+  host: "localhost"          # or "mqtt" when sharing Frigate's Docker network
+  port: 1883
+  username: ""
+  password: ""
+  topic_prefix: "frigate"
+```
+
+Use the same broker host Frigate uses. With `network_mode: container:frigate` (TUI compose), `mqtt.host: mqtt` often works because you share Frigate’s network namespace.
+
+**Optional** — web **Summary** tab (LLM hourly report):
+
+```yaml
+genai_report:
+  default_hours: 6.0
+  base_url: http://127.0.0.1:11434   # Ollama; omit if Frigate config has genai.provider
+  model: llama3.2:latest
+  timeout: 180
+```
+
+Config file locations (first match wins):
+
+| Location | Typical use |
+|----------|-------------|
+| `./config.yaml` | Docker compose (mounted into the container) |
+| `~/.config/frigate-tui/config.yaml` | Local pip install |
+
+Environment variables override the file (highest priority after CLI flags):
+
+| Variable | Purpose |
+|----------|---------|
+| `FRIGATE_TUI_URL` | Frigate HTTP base URL |
+| `FRIGATE_TUI_INTERVAL` | Stats poll interval (seconds) |
+| `DEMO=1` | Run without Frigate (synthetic data) |
+
+See `config.example.yaml` for timeline filters, event polling, and GenAI retention settings.
+
+### 3. Install with Docker (recommended)
+
+Docker builds one image; the **web** service adds the `[web]` extra (FastAPI + Uvicorn).
+
+#### Terminal UI (TUI)
+
+Best when Frigate runs in Docker on the same host and the container is named `frigate`:
+
+```bash
+docker compose build
 docker compose run --rm frigate-tui
 ```
 
-The default `docker-compose.yml` uses `network_mode: "container:frigate"` and talks to Frigate on `localhost`. This works great if you have a container named `frigate` running on the same machine.
+`docker-compose.yml` uses `network_mode: "container:frigate"` so the TUI reaches Frigate at `http://localhost:5000` and can use Frigate’s MQTT hostname (`mqtt`).
 
-### If your Frigate container has a different name
-
-Edit `docker-compose.yml` and change:
-
-```yaml
-network_mode: "container:frigate"
-```
-
-to the actual name of your container, or run with an override:
+**Different Frigate container name:**
 
 ```bash
-docker compose run --rm --network container:your-frigate-container frigate-tui
+docker compose run --rm --network container:your-frigate-name frigate-tui
 ```
 
-Once the TUI starts, look at the **right-hand Activity Log** for connection status and live activity. With Frigate GenAI enabled and `mqtt` configured in `config.yaml`, **LLM:** lines show object descriptions (real-time over MQTT when using `network_mode: container:frigate`) and review summaries from the review poll. See [GenAI integration](#genai-integration) below for the web Summary report and related settings.
+Or edit `network_mode` in `docker-compose.yml`.
 
-### Demo mode (no Frigate required)
-
-```bash
-# Easiest way
-DEMO=1 docker compose run --rm frigate-tui
-
-# Alternative (explicit flag)
-docker compose run --rm frigate-tui frigate-tui --demo
-```
-
-### Passing other options
+**Frigate on another host** (no shared container network):
 
 ```bash
-# Force a specific Frigate URL
-FRIGATE_TUI_URL=http://192.168.1.100:5000 docker compose run --rm frigate-tui
-
-# Or pass flags directly
-docker compose run --rm frigate-tui frigate-tui -u http://192.168.1.100:5000
-```
-
-### Advanced / One-off usage
-
-If you need to point at a different Frigate instance:
-
-```bash
-# Different host
 FRIGATE_TUI_URL=http://192.168.1.50:5000 docker compose run --rm frigate-tui
+```
 
-# Or run without compose
+Set `mqtt.host` in `config.yaml` to an address reachable from that network namespace (often your LAN IP or `host.docker.internal`).
+
+**Mount config** — compose already mounts `./config.yaml` → `/app/config.yaml`. Restart after edits.
+
+#### Web dashboard
+
+The web service publishes port **8080** and uses its own network (required for port mapping). It joins external network `ai-network` by default so `FRIGATE_TUI_URL=http://frigate:5000` works when Frigate is on that network.
+
+```bash
+# Create the shared network once if you use service names (optional)
+docker network create ai-network 2>/dev/null || true
+
+docker compose --profile web up --build frigate-web
+```
+
+Open `http://<docker-host-lan-ip>:8080` from any machine on your LAN.
+
+**If Frigate is not on `ai-network`**, override the URL:
+
+```bash
+FRIGATE_TUI_URL=http://192.168.1.50:5000 docker compose --profile web up --build frigate-web
+```
+
+**Custom port:**
+
+```bash
+FRIGATE_WEB_PORT=8765 docker compose --profile web up --build frigate-web
+```
+
+Rebuild after code or dependency changes: always include `--build` the first time or after pulling updates.
+
+#### Docker without Compose
+
+```bash
 docker build -t frigate-tui .
 docker run -it --rm \
   --network container:frigate \
+  -v "$(pwd)/config.yaml:/app/config.yaml:ro" \
   -e FRIGATE_TUI_URL=http://localhost:5000 \
   frigate-tui
+
+# Web (build with web extras — see Dockerfile INSTALL_EXTRAS)
+docker build --build-arg INSTALL_EXTRAS="[web]" -t frigate-tui .
+docker run -d --rm -p 8080:8080 \
+  -v "$(pwd)/config.yaml:/app/config.yaml:ro" \
+  -e FRIGATE_TUI_URL=http://192.168.1.50:5000 \
+  frigate-tui frigate-tui web --host 0.0.0.0 --port 8080
 ```
+
+### 4. Install with pip (local Python)
+
+From the repository root:
+
+```bash
+# TUI only
+pip install -e .
+
+# TUI + web dashboard
+pip install -e ".[web]"
+
+# Development (hot reload, lint tools)
+pip install -e ".[dev]"
+```
+
+**Run:**
+
+```bash
+frigate-tui                              # TUI → http://localhost:5000
+frigate-tui -u http://192.168.1.50:5000  # custom Frigate URL
+
+frigate-tui web                          # web UI → http://0.0.0.0:8080
+frigate-tui web --port 8765
+FRIGATE_TUI_URL=http://192.168.1.50:5000 frigate-tui web
+```
+
+Place `config.yaml` in the current directory or `~/.config/frigate-tui/config.yaml`.
+
+**Dev TUI with Textual reload:**
+
+```bash
+textual run --dev frigate_tui.app:FrigateMonitor
+```
+
+### 5. Verify
+
+1. **Activity Log** (TUI right panel or web right column) should show connection success and periodic stats.
+2. With MQTT configured: look for **"MQTT connected — receiving events in real time"**.
+3. With Frigate GenAI enabled: **LLM:** lines and review summaries as activity occurs.
+4. Web: open **Summary** (auto-starts on page load) or **GenAI Log** after messages exist.
+
+If the log shows connection errors, fix `frigate_url` / `FRIGATE_TUI_URL` first, then MQTT host reachability.
+
+### Demo mode (no Frigate)
+
+```bash
+# Docker TUI
+DEMO=1 docker compose run --rm frigate-tui
+
+# Docker web
+DEMO=1 docker compose --profile web up --build frigate-web
+
+# pip
+frigate-tui --demo
+frigate-tui web --demo
+```
+
+### Installation troubleshooting
+
+| Symptom | Things to check |
+|---------|------------------|
+| Cannot reach Frigate | `frigate_url` / `FRIGATE_TUI_URL`; firewall; Docker network mode vs published ports |
+| MQTT never connects | `mqtt.host` reachable from the container/process; credentials; same broker as Frigate |
+| No GenAI / LLM lines | GenAI enabled in Frigate; MQTT for live descriptions; wait for new events/reviews |
+| Summary always fails | `genai_report.base_url` and `model`; Ollama running; timeout; Activity Log error detail |
+| Web snapshots broken | Browser uses proxied `/api/snapshot` — Frigate must be reachable from the **web** container |
+| `ai-network` not found | `docker network create ai-network` or set `FRIGATE_TUI_URL` to a reachable IP |
 
 ## Web Interface (Browser Dashboard)
 
@@ -134,25 +261,8 @@ A full web UI with **exact feature parity** to the TUI is available on the same 
 
 It re-uses the identical core (`FrigateMonitorCore`) for stats, health/pressure calculations, event list maintenance (dedup, ordering, MQTT vs poll), activity log messages, review/timeline surfacing, connection state, and demo mode. The result is the same numbers, same log lines, and same behavior — just rendered in a browser.
 
-### Install & Run
+Install via [Docker or pip](#installation). Example run output:
 
-```bash
-# Install the web extras (adds fastapi + uvicorn + jinja2)
-pip install "frigate-tui[web]"
-
-# Run the web dashboard (binds on all interfaces by default)
-frigate-tui web
-
-# Or with overrides
-FRIGATE_TUI_URL=http://192.168.1.50:5000 frigate-tui web --port 8765
-
-# Demo (no Frigate needed)
-frigate-tui web --demo
-```
-
-Then open the address shown in the terminal (it will print the LAN-accessible URLs when you bind to `0.0.0.0`).
-
-Example output:
 ```
 Starting Frigate web UI on http://0.0.0.0:8080 (target http://localhost:5000)
 Accessible on your network at:
@@ -164,30 +274,6 @@ The UI has six tabs: **Overview**, **Cameras** (FPS bars), **Events**, **Health 
 On first load, the web UI automatically requests a **Summary** report in the background (using `genai_report.default_hours`, typically 6h) so the Summary tab is often ready when you open it.
 
 Keyboard shortcuts that make sense in a browser (`r`, `c`, `1`–`6`, `?`) are supported. Click an event row for a snapshot preview, clip link, full GenAI object description, and linked review summary when available.
-
-### Docker (web profile)
-
-The web service needs the optional `[web]` dependencies and cannot share `network_mode: container:frigate` (Docker doesn't allow port publishing with container network mode).
-
-```bash
-# Build the image with web dependencies included + start
-docker compose --profile web up --build frigate-web
-
-# Demo mode
-DEMO=1 docker compose --profile web up --build frigate-web
-```
-
-**First time / after changing extras**: Always include `--build` (or run `docker compose --profile web build frigate-web`).
-
-The compose file sets `FRIGATE_TUI_URL=http://host.docker.internal:5000` by default (with `extra_hosts` for Linux compatibility). 
-
-If Frigate isn't reachable that way, override it:
-
-```bash
-FRIGATE_TUI_URL=http://192.168.1.42:5000 docker compose --profile web up --build frigate-web
-```
-
-Access the UI from other machines on your network using the Docker host's LAN IP + port (default 8080), e.g. `http://192.168.1.42:8080`.
 
 ### Why a web UI?
 
@@ -253,8 +339,7 @@ Shows every GenAI message in the time window, **newest first**, with camera, obj
 
 ## Configuration
 
-
-Priority (highest wins):
+Settings are covered in [Installation → Configure](#2-configure). Priority (highest wins):
 
 1. CLI flags (`--url`, `--interval`)
 2. Environment variables (`FRIGATE_TUI_URL`, `FRIGATE_TUI_INTERVAL`, …)
