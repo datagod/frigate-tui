@@ -31,6 +31,7 @@ services:
     # network — required for real-time GenAI/LLM description lines in the Activity Log.
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+      - ./sounds:/app/sounds:ro
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
 
@@ -79,6 +80,7 @@ services:
 
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+      - ./sounds:/app/sounds:ro
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
 

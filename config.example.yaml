@@ -39,10 +39,15 @@ genai_report:
   model: llama3.2:latest
   timeout: 180
 
-# Web UI event chime (browser only; queued playback, one sound per new detection)
+# Web UI alert sounds (browser only; queued playback). Place MP3/WAV files in ./sounds/
 web_alerts:
   enabled: true
   max_queue: 24
+  sounds:
+    default: event.mp3       # fallback when a kind has no mapping
+    event: event.mp3         # new Frigate detection (SSE event_alerts)
+    # review: review.mp3     # future: review / GenAI notifications
+    # notification: ping.mp3
 
 # Mounted into Docker containers as /app/config.yaml (see README Installation).
 # Web UI is served on :8080 via docker compose --profile web.

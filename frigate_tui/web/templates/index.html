@@ -150,10 +150,10 @@
             are driven by the same <code class="text-amber-400">FrigateMonitorCore</code>.<br><br>
             Live updates arrive over SSE. Activity Log messages, health calculations, event ordering, and MQTT vs poll
             behavior are identical to the TUI.<br><br>
-            <span class="text-[#c0c5d1]">Sound alerts (web only):</span> new detections can play a short chime in order
-            (queued playback). Use the <span class="text-white">Alerts</span> button in the header to enable browser audio,
-            then leave alerts On while you monitor. Configure <span class="font-mono text-[#a5b4fc]">web_alerts</span> in
-            <span class="font-mono">config.yaml</span> to disable sounds or limit queue depth.
+            <span class="text-[#c0c5d1]">Sound alerts (web only):</span> new detections play sounds from the
+            <span class="font-mono">sounds/</span> folder (MP3/WAV), queued in order. Map alert kinds in
+            <span class="font-mono text-[#a5b4fc]">web_alerts.sounds</span> (e.g. <span class="font-mono">event: event.mp3</span>).
+            Use the <span class="text-white">Alerts</span> header button to enable browser audio. Missing files use a built-in chime.
           </div>
           <div class="mt-4 text-xs text-[#6b7280]">
             Useful keys (global): <span class="font-mono">1-6</span> switch tabs • <span class="font-mono">r</span> refresh • <span class="font-mono">c</span> clear log • <span class="font-mono">p</span> cycle poll • <span class="font-mono">?</span> help<br>
@@ -897,7 +897,7 @@
       }
     }
 
-    // --- Event alert chime (web only): queued Web Audio playback ---
+    // --- Alert sounds (web only): queued MP3 from /sounds/ or synthesized fallback ---
     const EventAlertAudio = {
       queue: [],
       playing: false,
@@ -905,16 +905,49 @@
       enabled: false,
       configEnabled: true,
       maxQueue: 24,
+      soundMap: { default: 'event.mp3', event: 'event.mp3' },
+      availableFiles: [],
       ctx: null,
 
       configure(opts) {
         if (!opts) return;
         if (opts.max_queue != null) this.maxQueue = Math.max(1, opts.max_queue);
         this.configEnabled = opts.enabled !== false;
+        if (opts.sounds && typeof opts.sounds === 'object') {
+          this.soundMap = { ...opts.sounds };
+        }
         if (this.configEnabled && localStorage.getItem('frigate-tui-alerts') === '1') {
           this.enabled = true;
         }
         this.updateToggle();
+        this.refreshSoundCatalog();
+      },
+
+      async refreshSoundCatalog() {
+        try {
+          const r = await fetch('/api/sounds');
+          const data = await r.json();
+          if (data.ok && Array.isArray(data.files)) {
+            this.availableFiles = data.files;
+            if (data.mapping && typeof data.mapping === 'object') {
+              this.soundMap = { ...data.mapping };
+            }
+          }
+        } catch (e) {
+          // catalog optional; fallback chime still works
+        }
+      },
+
+      filenameForKind(kind) {
+        const key = (kind || 'event').toString();
+        const mapped = this.soundMap[key] || this.soundMap.default || 'event.mp3';
+        return mapped;
+      },
+
+      urlForKind(kind) {
+        const file = this.filenameForKind(kind);
+        if (!file) return null;
+        return '/sounds/' + encodeURIComponent(file).replace(/%2F/g, '/');
       },
 
       ensureContext() {
@@ -963,11 +996,9 @@
       },
 
       async unlock(enableAfter) {
-        const ctx = this.ensureContext();
-        if (!ctx) return false;
         try {
-          if (ctx.state === 'suspended') await ctx.resume();
-          await this.playChime();
+          if (this.ensureContext() && this.ctx.state === 'suspended') await this.ctx.resume();
+          await this.playAlert({ sound: 'event' });
         } catch (e) {
           return false;
         }
@@ -995,7 +1026,7 @@
         if (!this.configEnabled || !this.enabled || !this.unlocked || !alerts || !alerts.length) return;
         for (let i = 0; i < alerts.length; i++) {
           if (this.queue.length >= this.maxQueue) break;
-          this.queue.push(alerts[i]);
+          this.queue.push(alerts[i] || { sound: 'event' });
         }
         this.refreshOverviewAlerts();
         this.drain();
@@ -1004,15 +1035,41 @@
       async drain() {
         if (this.playing || this.queue.length === 0) return;
         this.playing = true;
-        this.queue.shift();
+        const item = this.queue.shift();
         try {
-          await this.playChime();
+          await this.playAlert(item);
         } catch (e) {
           // autoplay or hardware failure — stop trying until user re-enables
         }
         this.playing = false;
         this.refreshOverviewAlerts();
         this.drain();
+      },
+
+      playMp3(url) {
+        return new Promise((resolve, reject) => {
+          const audio = new Audio(url);
+          audio.onended = () => resolve();
+          audio.onerror = () => reject(new Error('sound load failed: ' + url));
+          const p = audio.play();
+          if (p && typeof p.then === 'function') p.then(() => {}).catch(reject);
+        });
+      },
+
+      async playAlert(item) {
+        const kind = (item && item.sound) ? item.sound : 'event';
+        const file = this.filenameForKind(kind);
+        const hasFile = !this.availableFiles.length || this.availableFiles.includes(file);
+        const url = this.urlForKind(kind);
+        if (url && hasFile) {
+          try {
+            await this.playMp3(url);
+            return;
+          } catch (e) {
+            // fall through to synthesized chime
+          }
+        }
+        await this.playChime();
       },
 
       playChime() {

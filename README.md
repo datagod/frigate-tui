@@ -242,11 +242,19 @@ Keyboard shortcuts that make sense in a browser (`r`, `c`, `1`–`6`, `?`) are s
 
 When new detections arrive, the dashboard can play a short chime (queued in order, one at a time). Click **Alerts: Off** in the header once to allow browser audio, then toggle **On** / **Muted**. Configure in `config.yaml`:
 
+Place audio files in the project **`sounds/`** directory (mounted into the web container at `/app/sounds`). Map alert kinds to filenames:
+
 ```yaml
 web_alerts:
   enabled: true
   max_queue: 24
+  sounds:
+    default: event.mp3
+    event: event.mp3
+    # review: review.mp3
 ```
+
+Files are served at `/sounds/<filename>`. List available files: `GET /api/sounds`. If a mapped file is missing, a built-in chime is used instead.
 
 ### Why a web UI?
 

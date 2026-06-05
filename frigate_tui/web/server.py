@@ -18,8 +18,10 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.templating import Jinja2Templates
 from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from starlette.staticfiles import StaticFiles
 
 from frigate_tui.core import FrigateMonitorCore
+from frigate_tui.web.sounds_util import list_sound_files, sounds_directory
 
 
 class Broadcaster:
@@ -158,6 +160,23 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
 
     # Templates live next to this file
     templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
+
+    sounds_dir = sounds_directory()
+    if sounds_dir is not None:
+        app.mount("/sounds", StaticFiles(directory=sounds_dir), name="sounds")
+
+    @app.get("/api/sounds")
+    async def api_sounds():
+        """List available sound files and configured alert → filename mappings."""
+        root = sounds_dir or sounds_directory()
+        return JSONResponse(
+            {
+                "ok": True,
+                "directory": str(root) if root else None,
+                "files": list_sound_files(root),
+                "mapping": dict(core.web_alerts_sounds),
+            }
+        )
 
     @app.get("/")
     async def index(request: Request):

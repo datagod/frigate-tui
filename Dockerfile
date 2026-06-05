@@ -30,6 +30,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Copy the remaining supporting files (compose, example config, docs, etc.)
 COPY config.example.yaml docker-compose.yml ./
+COPY sounds ./sounds
 
 # Default to running the TUI.
 # The CLI automatically treats bare invocation as `frigate-tui run`,

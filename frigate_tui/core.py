@@ -82,6 +82,17 @@ class FrigateMonitorCore:
         web_alerts = dict(s.get("web_alerts") or {})
         self.web_alerts_enabled: bool = bool(web_alerts.get("enabled", True))
         self.web_alerts_max_queue: int = max(1, int(web_alerts.get("max_queue", 24)))
+        raw_sounds = web_alerts.get("sounds") or {}
+        self.web_alerts_sounds: dict[str, str] = (
+            {str(k): str(v) for k, v in raw_sounds.items()}
+            if isinstance(raw_sounds, dict)
+            else {}
+        )
+        if "default" not in self.web_alerts_sounds:
+            self.web_alerts_sounds.setdefault(
+                "default", self.web_alerts_sounds.get("event", "event.mp3")
+            )
+        self.web_alerts_sounds.setdefault("event", self.web_alerts_sounds["default"])
         self._genai_activity_hours_keep: float = float(
             s.get("genai_activity_hours_keep", 48.0)
         )
@@ -275,6 +286,7 @@ class FrigateMonitorCore:
             "web_alerts": {
                 "enabled": self.web_alerts_enabled,
                 "max_queue": self.web_alerts_max_queue,
+                "sounds": dict(self.web_alerts_sounds),
             },
         }
 
@@ -930,6 +942,7 @@ class FrigateMonitorCore:
                         "id": e.id,
                         "camera": e.camera,
                         "label": e.display_label or e.label,
+                        "sound": "event",
                     }
                     for e in new_only
                 ],
