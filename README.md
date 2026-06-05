@@ -29,8 +29,8 @@ Watch camera FPS, detector queues / pressure, GPU usage, incoming events, and sy
 
 ## Requirements
 
-- **Frigate** 0.13+ (0.17+ for full GenAI metadata), reachable over HTTP from where you run frigate-tui
-- **Python 3.10+** — only if installing without Docker
+- **Docker** and **Docker Compose**
+- **Frigate** 0.13+ (0.17+ for full GenAI metadata), reachable over HTTP from the frigate-tui container
 - **Modern terminal** with truecolor (TUI): Kitty, WezTerm, iTerm2, Windows Terminal, etc.
 - **MQTT broker** (recommended) — same one Frigate uses, for real-time events and GenAI description updates
 - **LLM endpoint** (optional) — Ollama or OpenAI-compatible API for the web **Summary** tab
@@ -49,7 +49,7 @@ docker compose --profile web up --build frigate-web   # browser UI on :8080
 
 ## Installation
 
-This project can run as a **terminal UI (TUI)** or a **web dashboard**. Both use the same `config.yaml` and core logic. Pick one install method below.
+This project runs in **Docker** as a **terminal UI (TUI)** or **web dashboard**. Both services use the same `config.yaml` and core logic.
 
 ### 1. Get the project
 
@@ -98,12 +98,7 @@ genai_report:
   timeout: 180
 ```
 
-Config file locations (first match wins):
-
-| Location | Typical use |
-|----------|-------------|
-| `./config.yaml` | Docker compose (mounted into the container) |
-| `~/.config/frigate-tui/config.yaml` | Local pip install |
+**Config file** — compose mounts `./config.yaml` into the container at `/app/config.yaml`. Edit the file on the host and restart the service.
 
 Environment variables override the file (highest priority after CLI flags):
 
@@ -115,7 +110,7 @@ Environment variables override the file (highest priority after CLI flags):
 
 See `config.example.yaml` for timeline filters, event polling, and GenAI retention settings.
 
-### 3. Install with Docker (recommended)
+### 3. Build and run
 
 Docker builds one image; the **web** service adds the `[web]` extra (FastAPI + Uvicorn).
 
@@ -193,41 +188,7 @@ docker run -d --rm -p 8080:8080 \
   frigate-tui frigate-tui web --host 0.0.0.0 --port 8080
 ```
 
-### 4. Install with pip (local Python)
-
-From the repository root:
-
-```bash
-# TUI only
-pip install -e .
-
-# TUI + web dashboard
-pip install -e ".[web]"
-
-# Development (hot reload, lint tools)
-pip install -e ".[dev]"
-```
-
-**Run:**
-
-```bash
-frigate-tui                              # TUI → http://localhost:5000
-frigate-tui -u http://192.168.1.50:5000  # custom Frigate URL
-
-frigate-tui web                          # web UI → http://0.0.0.0:8080
-frigate-tui web --port 8765
-FRIGATE_TUI_URL=http://192.168.1.50:5000 frigate-tui web
-```
-
-Place `config.yaml` in the current directory or `~/.config/frigate-tui/config.yaml`.
-
-**Dev TUI with Textual reload:**
-
-```bash
-textual run --dev frigate_tui.app:FrigateMonitor
-```
-
-### 5. Verify
+### 4. Verify
 
 1. **Activity Log** (TUI right panel or web right column) should show connection success and periodic stats.
 2. With MQTT configured: look for **"MQTT connected — receiving events in real time"**.
@@ -239,15 +200,11 @@ If the log shows connection errors, fix `frigate_url` / `FRIGATE_TUI_URL` first,
 ### Demo mode (no Frigate)
 
 ```bash
-# Docker TUI
+# TUI
 DEMO=1 docker compose run --rm frigate-tui
 
-# Docker web
+# Web
 DEMO=1 docker compose --profile web up --build frigate-web
-
-# pip
-frigate-tui --demo
-frigate-tui web --demo
 ```
 
 ### Installation troubleshooting
@@ -255,7 +212,7 @@ frigate-tui web --demo
 | Symptom | Things to check |
 |---------|------------------|
 | Cannot reach Frigate | `frigate_url` / `FRIGATE_TUI_URL`; firewall; Docker network mode vs published ports |
-| MQTT never connects | `mqtt.host` reachable from the container/process; credentials; same broker as Frigate |
+| MQTT never connects | `mqtt.host` reachable from the container; credentials; same broker as Frigate |
 | No GenAI / LLM lines | GenAI enabled in Frigate; MQTT for live descriptions; wait for new events/reviews |
 | Summary always fails | `genai_report.base_url` and `model`; Ollama running; timeout; Activity Log error detail |
 | Web snapshots broken | Browser uses proxied `/api/snapshot` — Frigate must be reachable from the **web** container |
@@ -267,7 +224,7 @@ A full web UI with **exact feature parity** to the TUI is available on the same 
 
 It re-uses the identical core (`FrigateMonitorCore`) for stats, health/pressure calculations, event list maintenance (dedup, ordering, MQTT vs poll), activity log messages, review/timeline surfacing, connection state, and demo mode. The result is the same numbers, same log lines, and same behavior — just rendered in a browser.
 
-Install via [Docker or pip](#installation). Example run output:
+Install via [Docker](#installation). Example run output:
 
 ```
 Starting Frigate web UI on http://0.0.0.0:8080 (target http://localhost:5000)
@@ -347,9 +304,9 @@ Shows every GenAI message in the time window, **newest first**, with camera, obj
 
 Settings are covered in [Installation → Configure](#2-configure). Priority (highest wins):
 
-1. CLI flags (`--url`, `--interval`)
+1. CLI flags passed in the container `command` (`--url`, `--interval`, …)
 2. Environment variables (`FRIGATE_TUI_URL`, `FRIGATE_TUI_INTERVAL`, …)
-3. `~/.config/frigate-tui/config.yaml` or local `./config.yaml`
+3. `./config.yaml` (mounted at `/app/config.yaml`)
 4. Built-in defaults (`http://localhost:5000`, 1.0s poll interval, 600s / 10min for "Stats OK" messages)
 
 See `config.example.yaml` for the full schema.
@@ -396,16 +353,11 @@ When enabled, the Activity Log will say **"MQTT connected — receiving events i
 
 ## Development
 
+Rebuild the image after code changes:
+
 ```bash
-# Hot-reloading development
-textual run --dev frigate_tui.app:FrigateMonitor
-
-# Run tests (when added)
-pytest
-
-# Format & lint
-ruff check --fix .
-ruff format .
+docker compose build
+docker compose --profile web up --build frigate-web
 ```
 
 ## Roadmap / Nice-to-Haves
