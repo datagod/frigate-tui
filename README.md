@@ -6,7 +6,7 @@ Both the TUI and the optional web UI share the exact same core logic (`FrigateMo
 
 Watch camera FPS, detector queues / pressure, GPU usage, incoming events, and system health directly from your terminal (or tmux), or in a browser over your local network.
 
-![screenshot placeholder](images/screenshot.jpg)
+![main](images/screenshot.jpg)
 
 ## Features
 
@@ -20,6 +20,10 @@ Watch camera FPS, detector queues / pressure, GPU usage, incoming events, and sy
 - **GenAI / LLM integration** (Frigate 0.17+): object descriptions and review summaries in the Activity Log; web **Summary** tab (hourly LLM narrative); **GenAI Log** tab (raw messages); Events table **AI Description** column with full text in the event modal
 - Keyboard-first navigation (TUI), clean error states, auto-retry
 - Works great over SSH and inside tmux (TUI); or over the local network in any browser (Web)
+
+![GenAI1](images/FrigateTuiWeb1.jpg)
+
+![GenAI1](images/FrigateTuiWeb2.jpg)
 
 ## Requirements
 
