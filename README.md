@@ -17,6 +17,7 @@ Watch camera FPS, detector queues / pressure, GPU usage, incoming events, and sy
 - Live events feed with object-type color coding (person, car, dog, cat…)
 - GPU, storage, uptime, and detector metrics
 - **Web dashboard** (optional): full feature parity in the browser, LAN-accessible, with proxied snapshots/clips and live SSE updates
+- **GenAI / LLM integration** (Frigate 0.17+): object descriptions and review summaries in the Activity Log; web **Summary** tab (hourly LLM narrative); **GenAI Log** tab (raw messages); Events table **AI Description** column with full text in the event modal
 - Keyboard-first navigation (TUI), clean error states, auto-retry
 - Works great over SSH and inside tmux (TUI); or over the local network in any browser (Web)
 
@@ -89,7 +90,7 @@ to the actual name of your container, or run with an override:
 docker compose run --rm --network container:your-frigate-container frigate-tui
 ```
 
-Once the TUI starts, look at the **right-hand Activity Log** for connection status and live activity. With Frigate GenAI enabled and `mqtt` configured in `config.yaml`, **LLM:** lines show object descriptions (real-time over MQTT when using `network_mode: container:frigate`) and review summaries from the review poll.
+Once the TUI starts, look at the **right-hand Activity Log** for connection status and live activity. With Frigate GenAI enabled and `mqtt` configured in `config.yaml`, **LLM:** lines show object descriptions (real-time over MQTT when using `network_mode: container:frigate`) and review summaries from the review poll. See [GenAI integration](#genai-integration) below for the web Summary report and related settings.
 
 ### Demo mode (no Frigate required)
 
@@ -158,9 +159,11 @@ Accessible on your network at:
   http://192.168.1.42:8080
 ```
 
-The UI has the same four tabs (Overview / Cameras with FPS bars / Events / Health), the persistent Activity Log, top summary strip, and connection status. Live updates arrive via SSE. Camera cards, color coding, health pressure, and every log message you see in the TUI appear here too.
+The UI has six tabs: **Overview**, **Cameras** (FPS bars), **Events**, **Health / Queues**, **Summary** (LLM activity report), and **GenAI Log** (chronological GenAI messages). It also has the persistent Activity Log, top metrics strip, and connection status. Live updates arrive via SSE. Camera cards, color coding, health pressure, and every log message you see in the TUI appear here too.
 
-Keyboard shortcuts that make sense in a browser (r, c, 1-4, ?) are supported. Click an event row to see a snapshot preview + clip link (when Frigate has the media).
+On first load, the web UI automatically requests a **Summary** report in the background (using `genai_report.default_hours`, typically 6h) so the Summary tab is often ready when you open it.
+
+Keyboard shortcuts that make sense in a browser (`r`, `c`, `1`–`6`, `?`) are supported. Click an event row for a snapshot preview, clip link, full GenAI object description, and linked review summary when available.
 
 ### Docker (web profile)
 
@@ -193,10 +196,60 @@ Access the UI from other machines on your network using the Docker host's LAN IP
 - Snapshots and clips are **proxied** through the web server, so they load even if your browser can't directly reach Frigate (common in Docker setups).
 - Live updates via SSE (stats, events, activity log, connection status).
 - Easy snapshot previews + clip links when clicking events.
+- **Summary** and **GenAI Log** tabs for LLM-backed activity review (see below).
 - Multiple viewers can watch the same dashboard simultaneously.
 - Same configuration, MQTT support, demo mode, and health/queue calculations.
 
 The TUI remains the primary interactive terminal experience (great over SSH); the web dashboard is a first-class peer for LAN/browser access. Both are fully supported.
+
+## GenAI integration
+
+Frigate’s GenAI features (review metadata and per-object LLM descriptions) are surfaced throughout the monitor:
+
+### Activity Log (TUI and web)
+
+- **Object descriptions** — `LLM:` lines when Frigate generates text for a tracked object (`description` on events). Lowest latency with **MQTT** (`frigate/tracked_object_update`); otherwise descriptions appear via HTTP event polling.
+- **Review summaries** — one line per review when Frigate writes GenAI metadata (`title`, `shortSummary`, etc.) on `/api/review` items.
+- **Summary report status** — start, success, and detailed errors when generating the web Summary (timeouts, HTTP errors, missing LLM config).
+
+Timeline noise (Visible / Gone / Stationary) can be filtered via `timeline_log_*` settings in `config.example.yaml`.
+
+### Web-only: Summary tab
+
+Builds a **markdown activity briefing** for a selectable window (1–24 hours, default from config):
+
+1. Collects stored GenAI messages (reviews + objects) for that window.
+2. Sends them to an Ollama / OpenAI-compatible chat endpoint (`POST …/api/chat`).
+3. Renders **Overall** plus **hour sections newest-first** (current hour at the top).
+
+Configure the LLM in `config.yaml`:
+
+```yaml
+genai_report:
+  default_hours: 6.0
+  base_url: http://ollama:11434   # optional if Frigate config already has genai.provider
+  model: llama3.2:latest
+  timeout: 180
+```
+
+If `base_url` and `model` are omitted, settings are taken from Frigate’s global `genai` provider when reachable.
+
+The Summary is also kicked off automatically when the web page loads (same default hours).
+
+### Web-only: GenAI Log tab
+
+Shows every GenAI message in the time window, **newest first**, with camera, object type, identified names (`sub_labels`), review title, and full description text.
+
+### Events tab
+
+- **AI Description** column — truncated object description from Frigate GenAI.
+- Event modal — full description plus review GenAI block when a matching review exists.
+
+### Requirements
+
+- Frigate with GenAI enabled for your cameras/objects.
+- **MQTT recommended** for live description lines in the Activity Log.
+- A reachable LLM for the **Summary** tab (`genai_report` or Frigate `genai` settings).
 
 ## Configuration
 
@@ -212,6 +265,9 @@ See `config.example.yaml` for the full schema.
 
 Notable config options include:
 - `stats_log_interval`: seconds between "Stats OK" messages in the Activity Log (default: 600 / 10 minutes). Errors are always logged immediately.
+- `genai_report`: LLM endpoint, model, timeout, and `default_hours` for the web Summary / GenAI Log tabs.
+- `genai_activity_hours_keep` / `genai_activity_max`: how long and how many GenAI messages to retain in memory for reports.
+- `events_poll_interval` / `events_reconcile_interval`: keep the Events tab aligned with the Activity Log when not using MQTT for every update.
 
 ### Real-time Events via MQTT (Recommended)
 
@@ -235,7 +291,7 @@ When enabled, the Activity Log will say **"MQTT connected — receiving events i
 |---------|-------------------------|
 | `q`     | Quit                    |
 | `r`     | Force refresh           |
-| `1-4`   | Switch tabs             |
+| `1-6`   | Switch tabs (web: includes Summary & GenAI Log) |
 | `Tab`   | Cycle focus             |
 | `?`     | Help / key legend       |
 | `F2`    | Textual dev console (dev mode) |
@@ -263,11 +319,9 @@ ruff format .
 
 ## Roadmap / Nice-to-Haves
 
-- Optional MQTT push path (lower latency, less polling)
 - Snapshot thumbnail previews in event detail (Pillow + sixel/kitty protocol)
-- Review items tab (higher-signal than raw events)
-- Simple `--demo` mode with synthetic data
-- Docker image for "attach and run TUI inside container"
+- Dedicated Reviews tab in the TUI (review summaries already appear in the Activity Log and web GenAI views)
+- Persist GenAI activity history across restarts (currently in-memory for the session)
 
 ## License
 

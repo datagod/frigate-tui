@@ -192,24 +192,64 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
-    @app.get("/api/genai/activity")
-    async def api_genai_activity(hours: float = 1.0):
-        """Structured GenAI messages from the last N hours, grouped by hour."""
-        hrs = max(0.25, min(72.0, float(hours)))
-        sections = core.get_genai_sections(hrs)
-        total = sum(s["count"] for s in sections)
-        return JSONResponse({"ok": True, "hours": hrs, "total": total, "sections": sections})
-
-    @app.post("/api/genai/report")
-    async def api_genai_report(request: Request):
-        """Send recent GenAI messages to the configured LLM for a narrative hourly report."""
+    @app.post("/api/log")
+    async def api_log(request: Request):
+        """Append a line to the Activity Log (e.g. client-side summary request failures)."""
         try:
             body = await request.json()
         except Exception:
             body = {}
-        hrs = max(0.25, min(24.0, float(body.get("hours", 1.0))))
-        result = await core.generate_genai_report(hrs)
-        return JSONResponse(result)
+        message = str(body.get("message") or "").strip()
+        if not message:
+            return JSONResponse({"ok": False, "error": "message required"}, status_code=400)
+        level = str(body.get("level") or "info").strip().lower()
+        if level not in ("info", "success", "warning", "error"):
+            level = "info"
+        core.add_log(message, level)
+        return JSONResponse({"ok": True})
+
+    @app.get("/api/genai/activity")
+    async def api_genai_activity(hours: float | None = None):
+        """Structured GenAI messages from the last N hours, grouped by hour."""
+        hrs = max(0.25, min(72.0, float(hours if hours is not None else core.genai_report_default_hours)))
+        sections = core.get_genai_sections(hrs)
+        total = sum(s["count"] for s in sections)
+        return JSONResponse({"ok": True, "hours": hrs, "total": total, "sections": sections})
+
+    @app.get("/api/genai/messages")
+    async def api_genai_messages(hours: float | None = None):
+        """Chronological GenAI messages, newest first."""
+        hrs = max(0.25, min(72.0, float(hours if hours is not None else core.genai_report_default_hours)))
+        messages = core.get_genai_messages(hrs)
+        return JSONResponse({"ok": True, "hours": hrs, "total": len(messages), "messages": messages})
+
+    @app.post("/api/genai/report")
+    async def api_genai_report(request: Request):
+        """Send recent GenAI messages to the configured LLM for a narrative hourly report."""
+        hrs = core.genai_report_default_hours
+        try:
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            hrs = max(0.25, min(24.0, float(body.get("hours", core.genai_report_default_hours))))
+            result = await core.generate_genai_report(hrs)
+            status = 200 if result.get("ok") else 400
+            return JSONResponse(result, status_code=status)
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+            core.add_log(f"Summary failed (API): {err}", "error")
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": err,
+                    "hours": hrs,
+                    "sections": [],
+                    "report": None,
+                    "logged": True,
+                },
+                status_code=500,
+            )
 
     @app.get("/api/event/{event_id}")
     async def api_event_detail(event_id: str):

@@ -20,7 +20,7 @@ from typing import Any, Callable, Awaitable
 
 from frigate_tui import __version__
 from frigate_tui.api import FrigateClient
-from frigate_tui.genai_activity import group_by_hour, make_activity_record
+from frigate_tui.genai_activity import group_by_hour, list_chronological, make_activity_record
 from frigate_tui.genai_report import generate_activity_report, resolve_llm_settings
 from frigate_tui.models import (
     CameraStats,
@@ -76,6 +76,9 @@ class FrigateMonitorCore:
             s.get("timeline_log_visible_min_score", 0.85)
         )
         self.genai_report_config: dict[str, Any] = dict(s.get("genai_report") or {})
+        self.genai_report_default_hours: float = float(
+            self.genai_report_config.get("default_hours", 6.0)
+        )
         self._genai_activity_hours_keep: float = float(
             s.get("genai_activity_hours_keep", 48.0)
         )
@@ -506,6 +509,9 @@ class FrigateMonitorCore:
         camera: str,
         title: str = "",
         text: str = "",
+        label: str = "",
+        objects: list[str] | None = None,
+        sub_labels: list[str] | None = None,
         threat: int | float | None = None,
         ref_id: str = "",
         ts: float | None = None,
@@ -521,6 +527,9 @@ class FrigateMonitorCore:
             camera=camera,
             title=title,
             text=text,
+            label=label,
+            objects=objects,
+            sub_labels=sub_labels,
             threat=threat,
             ref_id=ref_id,
             ts=ts,
@@ -540,20 +549,26 @@ class FrigateMonitorCore:
             f"{e['kind']}:{e['ref_id']}" for e in self.genai_activity if e.get("ref_id")
         }
 
-    def get_genai_sections(self, hours: float = 1.0) -> list[dict[str, Any]]:
-        return group_by_hour(self.genai_activity, hours)
+    def get_genai_sections(self, hours: float | None = None) -> list[dict[str, Any]]:
+        hrs = hours if hours is not None else self.genai_report_default_hours
+        return group_by_hour(self.genai_activity, hrs)
 
-    async def generate_genai_report(self, hours: float = 1.0) -> dict[str, Any]:
+    def get_genai_messages(self, hours: float | None = None) -> list[dict[str, Any]]:
+        hrs = hours if hours is not None else self.genai_report_default_hours
+        return list_chronological(self.genai_activity, hrs)
+
+    async def generate_genai_report(self, hours: float | None = None) -> dict[str, Any]:
         """Build hourly sections and ask the configured LLM for a narrative report."""
-        sections = self.get_genai_sections(hours)
+        hrs = hours if hours is not None else self.genai_report_default_hours
+        sections = self.get_genai_sections(hrs)
         if self.demo:
             report = (
                 "## Overall\n\n"
                 "Demo mode sample: one person approached the driveway; routine vehicle traffic "
                 "on the back deck; a dog was visible near the front porch.\n\n"
             )
-            for sec in sections:
-                report += f"## Hour {sec['hour_label']}\n\n"
+            for sec in sections:  # newest hour first
+                report += f"## {sec['hour_label']}\n\n"
                 report += (
                     f"{sec['count']} GenAI message(s) on cameras "
                     f"{', '.join(sorted({m['camera'] for m in sec['messages']}))}.\n\n"
@@ -561,18 +576,21 @@ class FrigateMonitorCore:
             return {
                 "ok": True,
                 "demo": True,
-                "hours": hours,
+                "hours": hrs,
                 "sections": sections,
                 "report": report.strip(),
                 "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             }
         if not sections:
+            msg = f"Summary failed: no GenAI messages in the last {hrs:g} hour(s)"
+            self.add_log(msg, "warning")
             return {
                 "ok": False,
                 "error": "No GenAI messages in the selected time window.",
-                "hours": hours,
+                "hours": hrs,
                 "sections": [],
                 "report": None,
+                "logged": True,
             }
 
         frigate_cfg: dict[str, Any] | None = None
@@ -584,35 +602,53 @@ class FrigateMonitorCore:
 
         llm = resolve_llm_settings(self.genai_report_config, frigate_cfg)
         if not llm:
+            msg = (
+                "Summary failed: no LLM configured — set genai_report.base_url and model in config.yaml "
+                "(or ensure Frigate config has genai.provider settings)"
+            )
+            self.add_log(msg, "error")
             return {
                 "ok": False,
                 "error": "No LLM configured. Add genai_report.base_url and model to config.yaml "
                 "(or ensure Frigate config has genai.provider settings).",
-                "hours": hours,
+                "hours": hrs,
                 "sections": sections,
                 "report": None,
+                "logged": True,
             }
 
+        n_msgs = sum(s["count"] for s in sections)
         timeout = float(self.genai_report_config.get("timeout", 180))
+        self.add_log(
+            f"Summary: requesting report for {n_msgs} GenAI message(s) over {hrs:g}h "
+            f"via {llm['model']} @ {llm['base_url']} (timeout {timeout:.0f}s)",
+            "info",
+        )
         report, err = await generate_activity_report(
             base_url=llm["base_url"],
             model=llm["model"],
             sections=sections,
-            hours=hours,
+            hours=hrs,
             timeout=timeout,
         )
         if err:
+            self.add_log(f"Summary failed ({llm['model']} @ {llm['base_url']}): {err}", "error")
             return {
                 "ok": False,
                 "error": err,
-                "hours": hours,
+                "hours": hrs,
                 "sections": sections,
                 "report": None,
                 "llm": llm,
+                "logged": True,
             }
+        self.add_log(
+            f"Summary generated for {n_msgs} GenAI message(s) over {hrs:g}h ({llm['model']})",
+            "success",
+        )
         return {
             "ok": True,
-            "hours": hours,
+            "hours": hrs,
             "sections": sections,
             "report": report,
             "llm": llm,
@@ -642,6 +678,8 @@ class FrigateMonitorCore:
                     camera=rev.camera,
                     title=str(g.get("title") or ""),
                     text=text,
+                    objects=rev.objects,
+                    sub_labels=rev.sub_labels,
                     threat=g.get("potential_threat_level"),
                     ref_id=rev.id,
                     ts=rev.start_time,
@@ -666,6 +704,8 @@ class FrigateMonitorCore:
             camera=rev.camera,
             title=str(title or ""),
             text=text,
+            objects=rev.objects,
+            sub_labels=rev.sub_labels,
             threat=threat,
             ref_id=rev.id,
             ts=rev.start_time,
@@ -692,10 +732,15 @@ class FrigateMonitorCore:
         label = event.display_label or event.label
         prefix = "LLM (demo)" if demo else "LLM"
         via = f" [{source}]" if source else ""
+        obj_label = event.label or "object"
+        subs = [event.sub_label] if event.sub_label else []
         self._record_genai_activity(
             kind="object",
             camera=event.camera,
             title=label,
+            label=obj_label,
+            objects=[obj_label],
+            sub_labels=subs,
             text=str(event.description),
             ref_id=event.id,
             ts=event.start_time,
@@ -1219,6 +1264,8 @@ class FrigateMonitorCore:
                     kind="object",
                     camera=camera,
                     title=label,
+                    label=label,
+                    objects=[label] if label else [],
                     text=desc,
                     ref_id=event_id,
                 )

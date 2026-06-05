@@ -34,6 +34,7 @@ mqtt:
 # GenAI Activity Report tab (web/TUI): hourly LLM summary of review/object GenAI messages
 # Uses the same Ollama/OpenAI-compatible endpoint as Frigate when base_url/model are omitted.
 genai_report:
+  default_hours: 6.0               # default window for Summary tab and GenAI Log
   base_url: http://ollama:11434
   model: llama3.2:latest
   timeout: 180
