@@ -95,6 +95,10 @@ async def lifespan(app: FastAPI):
                         "status_color": payload.status_color,
                     }
                     asyncio.create_task(broadcaster.publish({"type": "health", "data": h}))
+            elif kind == "event_alerts":
+                asyncio.create_task(
+                    broadcaster.publish({"type": "event_alerts", "data": payload or []})
+                )
             elif kind == "events":
                 # Send full authoritative list (browser does the right thing for order)
                 evs = []

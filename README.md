@@ -238,6 +238,16 @@ On first load, the web UI automatically requests a **Summary** report in the bac
 
 Keyboard shortcuts that make sense in a browser (`r`, `c`, `1`–`6`, `?`) are supported. Click an event row for a snapshot preview, clip link, full GenAI object description, and linked review summary when available.
 
+### Event alert chimes (web only)
+
+When new detections arrive, the dashboard can play a short chime (queued in order, one at a time). Click **Alerts: Off** in the header once to allow browser audio, then toggle **On** / **Muted**. Configure in `config.yaml`:
+
+```yaml
+web_alerts:
+  enabled: true
+  max_queue: 24
+```
+
 ### Why a web UI?
 
 - **Exact same features** as the TUI, with zero duplication of the important logic (powered by the shared `FrigateMonitorCore`).

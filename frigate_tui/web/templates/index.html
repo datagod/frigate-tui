@@ -83,6 +83,11 @@
       <button onclick="doRefresh()" class="px-3 py-1 rounded bg-[#272e3b] hover:bg-[#3a4255] active:bg-[#4a5263] text-xs">r — Refresh</button>
       <button onclick="clearLog()" class="px-3 py-1 rounded bg-[#272e3b] hover:bg-[#3a4255] text-xs">c — Clear Log</button>
       <button onclick="showHelp()" class="px-3 py-1 rounded bg-[#272e3b] hover:bg-[#3a4255] text-xs">? Help</button>
+      <button id="alerts-toggle" type="button" onclick="toggleEventAlerts()"
+        class="px-3 py-1 rounded bg-[#272e3b] hover:bg-[#3a4255] text-xs border border-transparent"
+        title="Play a chime when new events arrive (click once to enable browser audio)">
+        Alerts: Off
+      </button>
       <div class="text-[#6b7280] text-xs ml-2" id="target-url">{{ snapshot.frigate_url }}</div>
     </div>
   </div>
@@ -886,6 +891,138 @@
       }
     }
 
+    // --- Event alert chime (web only): queued Web Audio playback ---
+    const EventAlertAudio = {
+      queue: [],
+      playing: false,
+      unlocked: false,
+      enabled: false,
+      maxQueue: 24,
+      ctx: null,
+
+      configure(opts) {
+        if (!opts) return;
+        if (opts.max_queue != null) this.maxQueue = Math.max(1, opts.max_queue);
+        const want = opts.enabled !== false;
+        if (want && localStorage.getItem('frigate-tui-alerts') === '1') {
+          this.enabled = true;
+        }
+        this.updateToggle();
+      },
+
+      ensureContext() {
+        if (!this.ctx) {
+          const Ctx = window.AudioContext || window.webkitAudioContext;
+          if (!Ctx) return null;
+          this.ctx = new Ctx();
+        }
+        return this.ctx;
+      },
+
+      updateToggle() {
+        const btn = document.getElementById('alerts-toggle');
+        if (!btn) return;
+        if (!this.unlocked) {
+          btn.textContent = 'Alerts: Off';
+          btn.classList.remove('border-[#4f46e5]', 'text-[#a5b4fc]');
+          btn.title = 'Click to enable chimes for new events';
+        } else if (this.enabled) {
+          btn.textContent = 'Alerts: On';
+          btn.classList.add('border-[#4f46e5]', 'text-[#a5b4fc]');
+          btn.title = 'Chime on new events (click to mute)';
+        } else {
+          btn.textContent = 'Alerts: Muted';
+          btn.classList.remove('border-[#4f46e5]', 'text-[#a5b4fc]');
+          btn.title = 'Click to turn chimes back on';
+        }
+      },
+
+      async unlock(enableAfter) {
+        const ctx = this.ensureContext();
+        if (!ctx) return false;
+        try {
+          if (ctx.state === 'suspended') await ctx.resume();
+          await this.playChime();
+        } catch (e) {
+          return false;
+        }
+        this.unlocked = true;
+        if (enableAfter !== false) {
+          this.enabled = true;
+          localStorage.setItem('frigate-tui-alerts', '1');
+        }
+        this.updateToggle();
+        return true;
+      },
+
+      toggle() {
+        if (!this.unlocked) {
+          this.unlock(true);
+          return;
+        }
+        this.enabled = !this.enabled;
+        if (this.enabled) localStorage.setItem('frigate-tui-alerts', '1');
+        else localStorage.removeItem('frigate-tui-alerts');
+        this.updateToggle();
+      },
+
+      enqueueBatch(alerts) {
+        if (!this.enabled || !this.unlocked || !alerts || !alerts.length) return;
+        for (let i = 0; i < alerts.length; i++) {
+          if (this.queue.length >= this.maxQueue) break;
+          this.queue.push(alerts[i]);
+        }
+        this.drain();
+      },
+
+      async drain() {
+        if (this.playing || this.queue.length === 0) return;
+        this.playing = true;
+        this.queue.shift();
+        try {
+          await this.playChime();
+        } catch (e) {
+          // autoplay or hardware failure — stop trying until user re-enables
+        }
+        this.playing = false;
+        this.drain();
+      },
+
+      playChime() {
+        const ctx = this.ensureContext();
+        if (!ctx) return Promise.reject(new Error('Web Audio unavailable'));
+        const t0 = ctx.currentTime;
+        const master = ctx.createGain();
+        master.gain.setValueAtTime(0.12, t0);
+        master.connect(ctx.destination);
+
+        const tone = (freq, start, peak, decay) => {
+          const osc = ctx.createOscillator();
+          const g = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, start);
+          g.gain.setValueAtTime(0, start);
+          g.gain.linearRampToValueAtTime(peak, start + 0.012);
+          g.gain.exponentialRampToValueAtTime(0.0008, start + decay);
+          osc.connect(g);
+          g.connect(master);
+          osc.start(start);
+          osc.stop(start + decay + 0.05);
+        };
+
+        tone(1046.5, t0, 0.9, 0.45);
+        tone(1318.5, t0 + 0.11, 0.55, 0.55);
+
+        return new Promise((resolve) => {
+          window.setTimeout(resolve, 720);
+        });
+      },
+    };
+
+    function toggleEventAlerts() {
+      EventAlertAudio.toggle();
+    }
+
     function appendLog(entry) {
       const log = document.getElementById('activity-log');
       if (!log) return;
@@ -1046,6 +1183,9 @@
             if (healthHistory.length > 600) healthHistory.shift();
             updateGlobalCharts();
           }
+          break;
+        case 'event_alerts':
+          EventAlertAudio.enqueueBatch(data || []);
           break;
         case 'events':
           // Authoritative list from core (newest first)
@@ -1410,6 +1550,7 @@
 
       // Initial data from server-rendered snapshot (great first paint)
       const snap = {{ snapshot | tojson }};
+      EventAlertAudio.configure(snap.web_alerts || {});
       applySnapshot(snap);
 
       // Live poll interval control (runtime change to core polling speed)

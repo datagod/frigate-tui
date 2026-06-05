@@ -79,6 +79,9 @@ class FrigateMonitorCore:
         self.genai_report_default_hours: float = float(
             self.genai_report_config.get("default_hours", 6.0)
         )
+        web_alerts = dict(s.get("web_alerts") or {})
+        self.web_alerts_enabled: bool = bool(web_alerts.get("enabled", True))
+        self.web_alerts_max_queue: int = max(1, int(web_alerts.get("max_queue", 24)))
         self._genai_activity_hours_keep: float = float(
             s.get("genai_activity_hours_keep", 48.0)
         )
@@ -269,6 +272,10 @@ class FrigateMonitorCore:
             "tui_version": __version__,
             "health_history": self.health_history[-300:],  # ~5 min for charts
             "cameras_history": self.cameras_history[-300:],
+            "web_alerts": {
+                "enabled": self.web_alerts_enabled,
+                "max_queue": self.web_alerts_max_queue,
+            },
         }
 
     # ------------------------------------------------------------------
@@ -915,6 +922,18 @@ class FrigateMonitorCore:
         new_only = [e for e in incoming if e.id not in old_ids]
         self.recent_events = merged
         self._notify("events", self.recent_events)
+        if new_only and self.web_alerts_enabled:
+            self._notify(
+                "event_alerts",
+                [
+                    {
+                        "id": e.id,
+                        "camera": e.camera,
+                        "label": e.display_label or e.label,
+                    }
+                    for e in new_only
+                ],
+            )
 
         if log_new and new_only:
             for ev in new_only[:3]:
