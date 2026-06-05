@@ -141,6 +141,7 @@
 
               <div><span class="text-[#6b7280]">Events tracked:</span> <span id="ov-events" class="font-mono"></span></div>
               <div><span class="text-[#6b7280]">Connection:</span> <span id="ov-conn" class="font-mono"></span></div>
+              <div><span class="text-[#6b7280]">Event alerts:</span> <span id="ov-alerts" class="font-mono"></span></div>
             </div>
           </div>
 
@@ -148,11 +149,15 @@
             This dashboard has <span class="text-white">exact feature parity</span> with the terminal UI because both
             are driven by the same <code class="text-amber-400">FrigateMonitorCore</code>.<br><br>
             Live updates arrive over SSE. Activity Log messages, health calculations, event ordering, and MQTT vs poll
-            behavior are identical to the TUI.
+            behavior are identical to the TUI.<br><br>
+            <span class="text-[#c0c5d1]">Sound alerts (web only):</span> new detections can play a short chime in order
+            (queued playback). Use the <span class="text-white">Alerts</span> button in the header to enable browser audio,
+            then leave alerts On while you monitor. Configure <span class="font-mono text-[#a5b4fc]">web_alerts</span> in
+            <span class="font-mono">config.yaml</span> to disable sounds or limit queue depth.
           </div>
           <div class="mt-4 text-xs text-[#6b7280]">
             Useful keys (global): <span class="font-mono">1-6</span> switch tabs • <span class="font-mono">r</span> refresh • <span class="font-mono">c</span> clear log • <span class="font-mono">p</span> cycle poll • <span class="font-mono">?</span> help<br>
-            Click any event row for snapshot + clip links (when available).
+            Click any event row for snapshot + clip links (when available). Header <span class="font-mono">Alerts</span> toggles event chimes.
           </div>
         </div>
 
@@ -413,6 +418,7 @@
 
       const conn = snap.connection || {};
       set('ov-conn', conn.ok ? 'ok' : (conn.last_error || 'down'));
+      EventAlertAudio.refreshOverviewAlerts();
     }
 
     function renderCameras(cams) {
@@ -897,14 +903,15 @@
       playing: false,
       unlocked: false,
       enabled: false,
+      configEnabled: true,
       maxQueue: 24,
       ctx: null,
 
       configure(opts) {
         if (!opts) return;
         if (opts.max_queue != null) this.maxQueue = Math.max(1, opts.max_queue);
-        const want = opts.enabled !== false;
-        if (want && localStorage.getItem('frigate-tui-alerts') === '1') {
+        this.configEnabled = opts.enabled !== false;
+        if (this.configEnabled && localStorage.getItem('frigate-tui-alerts') === '1') {
           this.enabled = true;
         }
         this.updateToggle();
@@ -917,6 +924,23 @@
           this.ctx = new Ctx();
         }
         return this.ctx;
+      },
+
+      alertsStatusText() {
+        if (!this.configEnabled) return 'disabled in config';
+        if (!this.unlocked) return 'off (click Alerts in header)';
+        if (this.enabled) return `on (queue ${this.queue.length}/${this.maxQueue})`;
+        return 'muted';
+      },
+
+      refreshOverviewAlerts() {
+        const el = document.getElementById('ov-alerts');
+        if (el) {
+          el.textContent = this.alertsStatusText();
+          el.className = 'font-mono ' + (
+            this.enabled && this.unlocked ? 'text-[#a5b4fc]' : 'text-[#9ca3af]'
+          );
+        }
       },
 
       updateToggle() {
@@ -935,6 +959,7 @@
           btn.classList.remove('border-[#4f46e5]', 'text-[#a5b4fc]');
           btn.title = 'Click to turn chimes back on';
         }
+        this.refreshOverviewAlerts();
       },
 
       async unlock(enableAfter) {
@@ -967,11 +992,12 @@
       },
 
       enqueueBatch(alerts) {
-        if (!this.enabled || !this.unlocked || !alerts || !alerts.length) return;
+        if (!this.configEnabled || !this.enabled || !this.unlocked || !alerts || !alerts.length) return;
         for (let i = 0; i < alerts.length; i++) {
           if (this.queue.length >= this.maxQueue) break;
           this.queue.push(alerts[i]);
         }
+        this.refreshOverviewAlerts();
         this.drain();
       },
 
@@ -985,6 +1011,7 @@
           // autoplay or hardware failure — stop trying until user re-enables
         }
         this.playing = false;
+        this.refreshOverviewAlerts();
         this.drain();
       },
 
