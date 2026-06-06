@@ -9,7 +9,7 @@ timeline_interval: 5.0                 # seconds between timeline polls (for act
 timeline_log_enabled: true             # false = no Visible/Gone/Stationary lines in Activity Log
 timeline_log_stationary: false         # stationary rows are noisy; enable if you want them
 timeline_log_gone_min_score: 0.80      # min score to log Gone when a face/plate sub_label is present
-timeline_log_visible_min_score: 0.85   # min score for Visible without a sub_label (recognized faces always log)
+timeline_log_visible_min_score: 0.85   # legacy; visible/active detections always log and alert regardless of score
 stats_log_interval: 600.0              # seconds between "Stats OK" messages in the Activity Log (errors always log immediately). Default is 10 minutes.
 max_events: 150                        # how many events to keep in the live table
 events_poll_interval: 8.0              # HTTP poll for /api/events (always on; keeps Events tab near Activity Log)
@@ -33,11 +33,12 @@ mqtt:
   topic_prefix: "frigate"
 
 # GenAI Activity Report tab (web/TUI): hourly LLM summary of review/object GenAI messages
-# Uses the same Ollama/OpenAI-compatible endpoint as Frigate when base_url/model are omitted.
+# Text-only summary LLM (separate from Frigate's vision model). Recommended: qwen2.5:3b.
+# Omit base_url/model to fall back to Frigate's global genai settings.
 genai_report:
-  default_hours: 6.0               # default window for Summary tab and GenAI Log
+  default_hours: 1.0               # default window for Summary tab and GenAI Log
   base_url: http://ollama:11434
-  model: llama3.2:latest
+  model: qwen2.5:3b
   timeout: 180
   health_probe_timeout: 8          # LLM reachability check on Health tab (seconds)
 
@@ -48,7 +49,9 @@ frigate_report:
   auto_interval: 600               # seconds between auto-refresh in browser (0 = disabled)
   save_dir: reports              # Frigate_GenAI_Report_YYYYMMDD_HHMMSS.txt files
 
-# Chatterbox TTS Server — manual voice test on Overview tab (clone voice from reference_audio/)
+# Chatterbox TTS Server — voice picker on Overview tab (clone voice from reference_audio/)
+# voice_mode / reference_audio_filename are defaults until you pick a voice in the web UI;
+# the chosen voice is saved under cache_dir/.event_voice.json and used for event alerts.
 chatterbox_tts:
   enabled: true
   base_url: http://host.docker.internal:8004   # or http://chatterbox-tts-server:8004 on shared Docker network
@@ -58,7 +61,9 @@ chatterbox_tts:
   split_text: false
   timeout: 60
   cache_dir: localrecordings   # cached WAV/MP3 keyed by message text; replayed without calling Chatterbox
-  event_alerts: true           # new detections: speak "{label} on {camera}" via Chatterbox
+  event_alerts: true           # MQTT/HTTP new events: log, speak "{label} on {camera}"
+  timeline_alerts: true        # timeline visible/active detections: same log + TTS pipeline
+  alert_cooldown: 120          # seconds before the same detection (any path) can alert again
   event_template: "{label} on {camera}"
   default_test_message: "Person detected on driveway."
 

@@ -19,8 +19,12 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Awaitable
 
 from frigate_tui import __version__
-from frigate_tui.chatterbox_tts import chatterbox_settings_from_config
-from frigate_tui.tts_recording_cache import format_event_tts_message
+from frigate_tui.chatterbox_tts import apply_voice_override, chatterbox_settings_from_config
+from frigate_tui.tts_recording_cache import (
+    format_event_tts_message,
+    load_event_voice_pref,
+    save_event_voice_pref,
+)
 from frigate_tui.local_time import (
     configured_timezone_name,
     format_iso,
@@ -31,7 +35,7 @@ from frigate_tui.local_time import (
 )
 from frigate_tui.api import FrigateClient
 from frigate_tui.genai_activity import group_by_hour, list_chronological, make_activity_record
-from frigate_tui.genai_health import collect_genai_health
+from frigate_tui.genai_health import collect_genai_health, frigate_review_genai_probe
 from frigate_tui.genai_report import generate_activity_report, resolve_llm_settings
 from frigate_tui.report_storage import save_frigate_genai_report
 from frigate_tui.models import (
@@ -45,6 +49,7 @@ from frigate_tui.models import (
     frigate_event_from_dict,
     frigate_event_from_mqtt_payload,
     genai_summary_from_review_data,
+    normalize_sub_label,
     review_item_from_dict,
     timeline_entry_from_dict,
 )
@@ -95,7 +100,7 @@ class FrigateMonitorCore:
         )
         self.genai_report_config: dict[str, Any] = dict(s.get("genai_report") or {})
         self.genai_report_default_hours: float = float(
-            self.genai_report_config.get("default_hours", 6.0)
+            self.genai_report_config.get("default_hours", 1.0)
         )
         frigate_report = dict(s.get("frigate_report") or {})
         self.frigate_report_auto_interval: float = max(
@@ -120,6 +125,11 @@ class FrigateMonitorCore:
         self.chatterbox_tts_config: dict[str, Any] = chatterbox_settings_from_config(
             s.get("chatterbox_tts")
         )
+        saved_voice = load_event_voice_pref(self.chatterbox_tts_config.get("cache_dir", "localrecordings"))
+        self._event_tts_voice_mode: str | None = (
+            saved_voice.get("voice_mode") if saved_voice else None
+        )
+        self._event_tts_voice: str | None = saved_voice.get("voice") if saved_voice else None
         self._genai_activity_hours_keep: float = float(
             s.get("genai_activity_hours_keep", 48.0)
         )
@@ -163,6 +173,7 @@ class FrigateMonitorCore:
 
         # Track event ids for which we've already logged an LLM/GenAI description
         self._logged_llm_descriptions: set[str] = set()
+        self._detection_alert_at: dict[str, float] = {}
         self._timeline_reconcile_task: asyncio.Task | None = None
         self.genai_activity: list[dict[str, Any]] = []
         self._genai_activity_keys: set[str] = set()
@@ -340,11 +351,53 @@ class FrigateMonitorCore:
                     "default_test_message", ""
                 ),
                 "event_alerts": self.chatterbox_tts_config.get("event_alerts", False),
+                "timeline_alerts": self.chatterbox_tts_config.get("timeline_alerts", False),
                 "event_template": self.chatterbox_tts_config.get(
                     "event_template", "{label} on {camera}"
                 ),
+                "chosen_voice": self.get_event_tts_voice(),
             },
         }
+
+    def get_event_tts_voice(self) -> dict[str, str] | None:
+        """UI-selected voice for event alerts and TTS generation (overrides config)."""
+        mode = (self._event_tts_voice_mode or "").strip()
+        voice = (self._event_tts_voice or "").strip()
+        if mode in ("clone", "predefined") and voice:
+            return {"voice_mode": mode, "voice": voice}
+        return None
+
+    def set_event_tts_voice(
+        self,
+        voice_mode: str | None,
+        voice: str | None,
+    ) -> dict[str, str] | None:
+        """Save the UI-chosen voice used when generating new alert recordings."""
+        mode = str(voice_mode or "").strip().lower()
+        name = str(voice or "").strip()
+        if mode in ("clone", "predefined") and name:
+            self._event_tts_voice_mode = mode
+            self._event_tts_voice = name
+        else:
+            self._event_tts_voice_mode = None
+            self._event_tts_voice = None
+        save_event_voice_pref(
+            self.chatterbox_tts_config.get("cache_dir", "localrecordings"),
+            voice_mode=self._event_tts_voice_mode,
+            voice=self._event_tts_voice,
+        )
+        return self.get_event_tts_voice()
+
+    def get_event_tts_settings(self) -> dict[str, Any]:
+        """Chatterbox settings with UI-chosen voice applied when set."""
+        chosen = self.get_event_tts_voice()
+        if not chosen:
+            return dict(self.chatterbox_tts_config)
+        return apply_voice_override(
+            self.chatterbox_tts_config,
+            voice_mode=chosen["voice_mode"],
+            voice=chosen["voice"],
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -563,6 +616,116 @@ class FrigateMonitorCore:
             cut = cut.rsplit(" ", 1)[0]
         return cut.rstrip(".,;:") + "…"
 
+    def _detection_alerts_enabled(self) -> bool:
+        if not self.web_alerts_enabled:
+            return False
+        cfg = self.chatterbox_tts_config
+        return bool(
+            cfg.get("event_alerts")
+            or cfg.get("timeline_alerts", cfg.get("event_alerts", False))
+        )
+
+    def _detection_alert_cooldown(self) -> float:
+        cfg = self.chatterbox_tts_config
+        return float(
+            cfg.get("alert_cooldown", cfg.get("timeline_alert_cooldown", 120))
+        )
+
+    def _detection_alert_key(
+        self,
+        *,
+        det_id: str,
+        camera: str,
+        label: str,
+        sub_label: str | None,
+    ) -> str:
+        sub = normalize_sub_label(sub_label) or ""
+        sid = (det_id or "").strip() or f"anon:{camera}:{label}:{sub}"
+        return f"{sid}|{camera}|{label}|{sub}"
+
+    def _should_emit_detection_alert(
+        self,
+        *,
+        det_id: str,
+        camera: str,
+        label: str,
+        sub_label: str | None,
+    ) -> bool:
+        if not self._detection_alerts_enabled():
+            return False
+        key = self._detection_alert_key(
+            det_id=det_id,
+            camera=camera,
+            label=label,
+            sub_label=sub_label,
+        )
+        now = time.time()
+        cooldown = self._detection_alert_cooldown()
+        last = self._detection_alert_at.get(key, 0.0)
+        if now - last < cooldown:
+            return False
+        self._detection_alert_at[key] = now
+        if len(self._detection_alert_at) > 500:
+            cutoff = now - max(cooldown * 4, 600.0)
+            self._detection_alert_at = {
+                k: ts for k, ts in self._detection_alert_at.items() if ts >= cutoff
+            }
+        return True
+
+    def _notify_event_alerts(self, detections: list[dict[str, Any]]) -> None:
+        if not detections or not self._detection_alerts_enabled():
+            return
+        tts_cfg = self.chatterbox_tts_config
+        use_tts = bool(tts_cfg.get("enabled"))
+        tts_template = str(tts_cfg.get("event_template") or "{label} on {camera}")
+        alert_items: list[dict[str, Any]] = []
+        for det in detections:
+            label = str(det.get("label") or "object")
+            sub_label = det.get("sub_label")
+            camera = str(det.get("camera") or "camera")
+            det_id = str(det.get("id") or "")
+            if not self._should_emit_detection_alert(
+                det_id=det_id,
+                camera=camera,
+                label=label,
+                sub_label=sub_label,
+            ):
+                continue
+            item: dict[str, Any] = {
+                "id": det_id,
+                "camera": camera,
+                "label": str(det.get("display_label") or label),
+                "sound": event_alert_sound_key(label, sub_label),
+            }
+            if use_tts:
+                item["tts_text"] = format_event_tts_message(
+                    label,
+                    camera,
+                    sub_label=sub_label,
+                    template=tts_template,
+                )
+            alert_items.append(item)
+        if alert_items:
+            self._notify("event_alerts", alert_items)
+
+    def _maybe_emit_timeline_alert(self, entry: TimelineEntry) -> None:
+        if entry.class_type not in ("visible", "active"):
+            return
+        sub_label = normalize_sub_label(entry.sub_label)
+        display = f"{entry.label} ({sub_label})" if sub_label else entry.label
+        det_id = (entry.source_id or "").strip() or f"timeline-{entry.timestamp:.3f}"
+        self._notify_event_alerts(
+            [
+                {
+                    "id": det_id,
+                    "camera": entry.camera,
+                    "label": entry.label,
+                    "sub_label": sub_label,
+                    "display_label": display,
+                }
+            ],
+        )
+
     def _should_log_timeline_entry(self, entry: TimelineEntry) -> bool:
         """Filter timeline rows so GenAI/review lines stay readable in the Activity Log."""
         if not self.timeline_log_enabled:
@@ -575,9 +738,7 @@ class FrigateMonitorCore:
                 return score >= self.timeline_log_gone_min_score
             return score > 0.85
         if entry.class_type in ("visible", "active"):
-            if entry.sub_label:
-                return True
-            return score >= self.timeline_log_visible_min_score or score > 0.85
+            return True
         return entry.sub_label or score > 0.85
 
     def _record_genai_activity(
@@ -989,6 +1150,13 @@ class FrigateMonitorCore:
         """Probe LLM and summarize GenAI ingestion; notify listeners."""
         frigate_cfg = await self._get_frigate_config_cached()
         timeout = float(self.genai_report_config.get("health_probe_timeout", 8.0))
+        review_probe: dict[str, Any] | None = None
+        if not self.demo and self._client and self.connection_ok:
+            try:
+                reviews_raw = await self._client.get_review_items(limit=30)
+                review_probe = frigate_review_genai_probe(reviews_raw, hours=1.0)
+            except Exception:
+                review_probe = None
         health = await collect_genai_health(
             demo=self.demo,
             genai_report_config=self.genai_report_config,
@@ -998,6 +1166,7 @@ class FrigateMonitorCore:
             mqtt_connected=self.mqtt_connected,
             use_mqtt_for_events=self._use_mqtt_for_events,
             frigate_config=frigate_cfg,
+            frigate_review_probe=review_probe,
             llm_probe_timeout=timeout,
         )
         self.genai_health = health
@@ -1142,7 +1311,7 @@ class FrigateMonitorCore:
         incoming: list[FrigateEvent],
         *,
         log_new: bool = False,
-        log_prefix: str = "New event",
+        log_prefix: str = "Event",
         llm_source: str = "",
     ) -> bool:
         """Merge events into recent_events; notify listeners when the list changes."""
@@ -1164,29 +1333,33 @@ class FrigateMonitorCore:
         if self._events_signature(merged) == self._events_signature(self.recent_events):
             return False
 
+        old_by_id = {e.id: e for e in self.recent_events}
         new_only = [e for e in incoming if e.id not in old_ids]
+        sub_label_new: list[FrigateEvent] = []
+        for e in incoming:
+            if e.id not in old_ids:
+                continue
+            prev = old_by_id.get(e.id)
+            if prev is None:
+                continue
+            if not normalize_sub_label(prev.sub_label) and normalize_sub_label(e.sub_label):
+                sub_label_new.append(e)
         self.recent_events = merged
         self._notify("events", self.recent_events)
-        if new_only and self.web_alerts_enabled:
-            tts_cfg = self.chatterbox_tts_config
-            use_event_tts = bool(tts_cfg.get("enabled") and tts_cfg.get("event_alerts"))
-            tts_template = str(tts_cfg.get("event_template") or "{label} on {camera}")
-            alert_items = []
-            for e in new_only:
-                item: dict[str, Any] = {
-                    "id": e.id,
-                    "camera": e.camera,
-                    "label": e.display_label or e.label,
-                    "sound": event_alert_sound_key(e.label, e.sub_label),
-                }
-                if use_event_tts:
-                    item["tts_text"] = format_event_tts_message(
-                        item["label"],
-                        e.camera,
-                        template=tts_template,
-                    )
-                alert_items.append(item)
-            self._notify("event_alerts", alert_items)
+        alert_events = new_only + [e for e in sub_label_new if e.id not in {n.id for n in new_only}]
+        if alert_events:
+            self._notify_event_alerts(
+                [
+                    {
+                        "id": e.id,
+                        "camera": e.camera,
+                        "label": e.label,
+                        "sub_label": e.sub_label,
+                        "display_label": e.display_label or e.label,
+                    }
+                    for e in alert_events
+                ],
+            )
 
         if log_new and new_only:
             for ev in new_only[:3]:
@@ -1360,15 +1533,23 @@ class FrigateMonitorCore:
         except Exception as e:
             self.add_log(f"Timeline fetch error: {e}", "warning")
 
-    def _log_timeline_entry(self, entry: TimelineEntry) -> None:
-        sub = f" ({entry.sub_label})" if entry.sub_label else ""
+    def _log_timeline_entry(self, entry: TimelineEntry, *, emit_alert: bool = True) -> None:
+        sub_label = normalize_sub_label(entry.sub_label)
+        sub = f" ({sub_label})" if sub_label else ""
         score_str = f" ({entry.score:.0%})" if entry.score else ""
         attr = f" [{entry.attribute}]" if entry.attribute else ""
         zone = f" in {', '.join(entry.zones)}" if entry.zones else ""
-        msg = f"{entry.class_type.capitalize()}: {entry.label}{sub}{score_str}{attr}{zone} on {entry.camera}"
-        level = "info" if entry.class_type == "visible" else ("warning" if entry.class_type == "stationary" else "dim")
+        body = f"{entry.label}{sub}{score_str}{attr}{zone} on {entry.camera}"
+        if entry.class_type in ("visible", "active"):
+            msg = f"Event: {body}"
+            level = "success"
+        else:
+            msg = f"{entry.class_type.capitalize()}: {body}"
+            level = "warning" if entry.class_type == "stationary" else "dim"
         self.add_log(msg, level)
         if entry.class_type in ("visible", "active"):
+            if emit_alert:
+                self._maybe_emit_timeline_alert(entry)
             self._schedule_timeline_reconcile()
 
     async def _load_initial_timeline(self) -> None:
@@ -1398,7 +1579,7 @@ class FrigateMonitorCore:
                 ]
                 to_surface = all_interesting[:3]
                 for entry in reversed(to_surface):
-                    self._log_timeline_entry(entry)
+                    self._log_timeline_entry(entry, emit_alert=False)
                 if to_surface:
                     self.add_log(f"Loaded {len(to_surface)} recent timeline items on startup", "info")
         except Exception as e:
@@ -1471,7 +1652,7 @@ class FrigateMonitorCore:
                         label = fe.display_label
                         if changed:
                             if event_type == "new" or not is_tracked:
-                                self.add_log(f"New event (MQTT): {label} on {fe.camera}", "success")
+                                self.add_log(f"Event: {label} on {fe.camera}", "success")
                             elif event_type == "end":
                                 self.add_log(f"Event ended (MQTT): {label} on {fe.camera}", "info")
                         elif event_type == "end":

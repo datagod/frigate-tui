@@ -41,6 +41,14 @@ def chatterbox_settings_from_config(raw: dict[str, Any] | None) -> dict[str, Any
         or "Person detected on driveway.",
         "cache_dir": str(cfg.get("cache_dir", "localrecordings")).strip() or "localrecordings",
         "event_alerts": bool(cfg.get("event_alerts", False)),
+        "timeline_alerts": bool(cfg.get("timeline_alerts", cfg.get("event_alerts", False))),
+        "alert_cooldown": max(
+            5.0,
+            float(cfg.get("alert_cooldown", cfg.get("timeline_alert_cooldown", 120))),
+        ),
+        "timeline_alert_cooldown": max(
+            5.0, float(cfg.get("timeline_alert_cooldown", 120))
+        ),
         "event_template": str(cfg.get("event_template", "{label} on {camera}")).strip()
         or "{label} on {camera}",
     }
@@ -187,8 +195,8 @@ async def get_or_synthesize_speech(
 
 async def warm_event_tts_recordings(core: Any, items: list[dict[str, Any]]) -> None:
     """Generate or load cached TTS for new event alert messages."""
-    cfg = core.chatterbox_tts_config
-    if not cfg.get("enabled") or not cfg.get("event_alerts"):
+    cfg = core.get_event_tts_settings()
+    if not cfg.get("enabled"):
         return
     voice = voice_key_from_settings(cfg)
     for item in items or []:

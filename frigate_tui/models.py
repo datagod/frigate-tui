@@ -202,6 +202,28 @@ class TimelineEntry:
 # REST poll, initial load, and MQTT paths; also available to web/TUI)
 # ------------------------------------------------------------------
 
+def normalize_sub_label(value: Any) -> str | None:
+    """Extract a spoken name/tag from Frigate sub_label ([name, score] or string)."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                return _strip_classification_prefix(item)
+        return None
+    if isinstance(value, str):
+        return _strip_classification_prefix(value)
+    return None
+
+
+def _strip_classification_prefix(text: str) -> str | None:
+    """Frigate marks classifier tags with a leading * (e.g. *family)."""
+    cleaned = (text or "").strip()
+    if cleaned.startswith("*"):
+        cleaned = cleaned[1:].strip()
+    return cleaned or None
+
+
 def frigate_event_from_dict(raw: dict[str, Any], *, data: dict[str, Any] | None = None) -> FrigateEvent | None:
     """Normalize a raw event dict (from /api/events or similar) into FrigateEvent.
 
@@ -217,6 +239,12 @@ def frigate_event_from_dict(raw: dict[str, Any], *, data: dict[str, Any] | None 
                 end_time = float(end_time)
             except Exception:
                 end_time = None
+        sub_label = normalize_sub_label(raw.get("sub_label") or data.get("sub_label"))
+        if not sub_label:
+            plate = raw.get("recognized_license_plate") or data.get("recognized_license_plate")
+            if plate is not None:
+                plate_text = str(plate).strip()
+                sub_label = plate_text or None
         return FrigateEvent(
             id=str(raw.get("id", "")),
             camera=str(raw.get("camera", "unknown")),
@@ -227,7 +255,7 @@ def frigate_event_from_dict(raw: dict[str, Any], *, data: dict[str, Any] | None 
             has_snapshot=bool(raw.get("has_snapshot")),
             has_clip=bool(raw.get("has_clip")),
             zones=raw.get("zones") or [],
-            sub_label=raw.get("sub_label"),
+            sub_label=sub_label,
             average_estimated_speed=data.get("average_estimated_speed"),
             velocity_angle=data.get("velocity_angle"),
             attributes=data.get("attributes") or [],
@@ -327,9 +355,6 @@ def timeline_entry_from_dict(raw: dict[str, Any]) -> TimelineEntry | None:
     try:
         ts = float(raw.get("timestamp", 0))
         data = raw.get("data", {}) or {}
-        sub = data.get("sub_label")
-        if isinstance(sub, list) and sub:
-            sub = sub[0]
         return TimelineEntry(
             timestamp=ts,
             camera=str(raw.get("camera", "unknown")),
@@ -337,7 +362,7 @@ def timeline_entry_from_dict(raw: dict[str, Any]) -> TimelineEntry | None:
             source=str(raw.get("source", "")),
             source_id=str(raw.get("source_id", "")),
             label=str(data.get("label", "")),
-            sub_label=sub if isinstance(sub, str) else None,
+            sub_label=normalize_sub_label(data.get("sub_label")),
             score=data.get("score"),
             zones=data.get("zones") or [],
             attribute=str(data.get("attribute", "")),

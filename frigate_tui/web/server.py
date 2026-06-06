@@ -27,6 +27,14 @@ from frigate_tui.chatterbox_tts import (
     warm_event_tts_recordings,
 )
 from frigate_tui.core import FrigateMonitorCore
+from frigate_tui.tts_recording_cache import (
+    delete_recordings,
+    list_recordings,
+    media_type_for_filename,
+    recording_file_path,
+    resolve_recordings_dir,
+    safe_recording_filename,
+)
 from frigate_tui.web.sounds_util import list_sound_files, sounds_directory
 
 
@@ -190,6 +198,84 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
             }
         )
 
+    def _recordings_cache_dir() -> str:
+        return str(core.chatterbox_tts_config.get("cache_dir") or "localrecordings")
+
+    @app.get("/api/recordings")
+    async def api_recordings():
+        """List cached Chatterbox TTS recordings under localrecordings/."""
+        cache_dir = _recordings_cache_dir()
+        root = resolve_recordings_dir(cache_dir)
+        recordings = list_recordings(cache_dir)
+        return JSONResponse(
+            {
+                "ok": True,
+                "directory": str(root),
+                "total": len(recordings),
+                "recordings": recordings,
+            }
+        )
+
+    @app.get("/api/recordings/{filename}")
+    async def api_recording_file(filename: str, download: bool = False):
+        """Stream a cached recording for inline play or download."""
+        safe = safe_recording_filename(filename)
+        if not safe:
+            return JSONResponse({"ok": False, "error": "invalid filename"}, status_code=400)
+        path = recording_file_path(safe, cache_dir=_recordings_cache_dir())
+        if path is None or not path.is_file() or path.stat().st_size <= 0:
+            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        media_type = media_type_for_filename(safe)
+        disposition = "attachment" if download else "inline"
+        headers = {
+            "Content-Disposition": f'{disposition}; filename="{safe}"',
+            "Cache-Control": "public, max-age=86400",
+        }
+        return Response(content=path.read_bytes(), media_type=media_type, headers=headers)
+
+    @app.post("/api/recordings/delete")
+    async def api_recordings_delete(request: Request):
+        """Delete one or more cached recordings by basename."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        names = body.get("filenames") or body.get("files") or []
+        if isinstance(names, str):
+            names = [names]
+        if not isinstance(names, list) or not names:
+            return JSONResponse(
+                {"ok": False, "error": "filenames array required"},
+                status_code=400,
+            )
+        cache_dir = _recordings_cache_dir()
+        result = delete_recordings([str(n) for n in names], cache_dir=cache_dir)
+        deleted = result.get("deleted") or []
+        errors = result.get("errors") or {}
+        if deleted:
+            core.add_log(
+                f"Deleted {len(deleted)} TTS recording(s) from {cache_dir}",
+                "info",
+            )
+        if errors and not deleted:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "deleted": deleted,
+                    "errors": errors,
+                    "error": "no files deleted",
+                },
+                status_code=400,
+            )
+        return JSONResponse(
+            {
+                "ok": True,
+                "deleted": deleted,
+                "errors": errors,
+                "remaining": len(list_recordings(cache_dir)),
+            }
+        )
+
     @app.get("/")
     async def index(request: Request):
         """Render the dashboard.
@@ -227,6 +313,56 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
+    @app.get("/api/tts/voice")
+    async def api_tts_voice_get():
+        """Return the UI-chosen voice for event alerts and TTS generation."""
+        cfg = core.chatterbox_tts_config
+        if not cfg.get("enabled"):
+            return JSONResponse(
+                {"ok": False, "error": "Chatterbox TTS is disabled in config."},
+                status_code=503,
+            )
+        chosen = core.get_event_tts_voice()
+        default_mode = cfg.get("voice_mode", "clone")
+        default_voice = (
+            cfg.get("reference_audio_filename")
+            if default_mode == "clone"
+            else cfg.get("predefined_voice_id")
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "chosen": chosen,
+                "default": {"voice_mode": default_mode, "voice": default_voice},
+            }
+        )
+
+    @app.post("/api/tts/voice")
+    async def api_tts_voice_set(request: Request):
+        """Persist the UI-chosen voice used for event alerts and cache misses."""
+        cfg = core.chatterbox_tts_config
+        if not cfg.get("enabled"):
+            return JSONResponse(
+                {"ok": False, "error": "Chatterbox TTS is disabled in config."},
+                status_code=503,
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        chosen = core.set_event_tts_voice(
+            body.get("voice_mode"),
+            body.get("voice"),
+        )
+        if chosen:
+            core.add_log(
+                f"Event TTS voice set to {chosen['voice']} ({chosen['voice_mode']})",
+                "info",
+            )
+        else:
+            core.add_log("Event TTS voice cleared (using config default)", "info")
+        return JSONResponse({"ok": True, "chosen": chosen})
+
     @app.get("/api/tts/voices")
     async def api_tts_voices():
         """List Chatterbox clone and predefined voices for the test UI."""
@@ -249,6 +385,7 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
                     "ok": True,
                     "voices": voices,
                     "default": {"voice_mode": default_mode, "voice": default_voice},
+                    "chosen": core.get_event_tts_voice(),
                 }
             )
         except Exception as e:
@@ -276,11 +413,16 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
                 {"ok": False, "error": "text is required"},
                 status_code=400,
             )
-        speak_cfg = apply_voice_override(
-            cfg,
-            voice_mode=body.get("voice_mode"),
-            voice=body.get("voice"),
-        )
+        body_mode = str(body.get("voice_mode") or "").strip()
+        body_voice = str(body.get("voice") or "").strip()
+        if body_mode and body_voice:
+            speak_cfg = apply_voice_override(
+                cfg,
+                voice_mode=body_mode,
+                voice=body_voice,
+            )
+        else:
+            speak_cfg = core.get_event_tts_settings()
         try:
             audio, media_type, from_cache, saved_path = await get_or_synthesize_speech(
                 text, settings=speak_cfg

@@ -171,6 +171,7 @@
         <div onclick="switchTab('health')"   id="tab-health"   class="tab">Health / Queues</div>
         <div onclick="switchTab('summary')"  id="tab-summary"  class="tab">Summary</div>
         <div onclick="switchTab('genai-log')" id="tab-genai-log" class="tab">GenAI Log</div>
+        <div onclick="switchTab('recordings')" id="tab-recordings" class="tab">Recordings</div>
       </div>
 
       <!-- Tab contents -->
@@ -199,9 +200,10 @@
           </div>
 
           <div id="chatterbox-tts-panel" class="hidden mb-4 p-3 bg-[#161b26] border border-[#4a5263] rounded text-sm">
-            <div class="font-semibold text-[#c0c5d1] mb-1">Chatterbox TTS test</div>
+            <div class="font-semibold text-[#c0c5d1] mb-1">Chatterbox voice</div>
             <p class="text-[10px] text-[#6b7280] mb-2">
-              Pick a voice, enter text, and Speak. Cloned voices are listed first. Cached under
+              Choose the voice used for event alerts and new recordings. Test with Speak below.
+              Cloned voices are listed first. Cached under
               <span class="font-mono">localrecordings/</span> by message + voice.
             </p>
             <div class="flex flex-wrap items-center gap-2 text-xs mb-2">
@@ -232,9 +234,11 @@
             are driven by the same <code class="text-amber-400">FrigateMonitorCore</code>.<br><br>
             Live updates arrive over SSE. Activity Log messages, health calculations, event ordering, and MQTT vs poll
             behavior are identical to the TUI.<br><br>
-            <span class="text-[#c0c5d1]">Sound alerts (web only):</span> with Chatterbox
-            <span class="font-mono">event_alerts</span> enabled, new detections speak
-            <span class="font-mono">{label} on {camera}</span> (cached under <span class="font-mono">localrecordings/</span>).
+            <span class="text-[#c0c5d1]">Sound alerts (web only):</span> every Frigate detection
+            (MQTT events and timeline visible rows) is logged as
+            <span class="font-mono">Event: …</span> and spoken via Chatterbox
+            <span class="font-mono">{label} on {camera}</span> using the voice chosen above
+            (cached under <span class="font-mono">localrecordings/</span>).
             Otherwise MP3/WAV from <span class="font-mono">sounds/</span> via <span class="font-mono">web_alerts.sounds</span>.
             Use the <span class="text-white">Alerts</span> header button to enable browser audio.
           </div>
@@ -281,9 +285,9 @@
           <div class="flex flex-wrap items-center gap-2 mb-2 text-xs">
             <span class="text-[#6b7280]">Time range:</span>
             <select id="summary-hours" class="bg-[#161b26] border border-[#4a5263] rounded px-2 py-1 text-[#c0c5d1]">
-              <option value="1">1 hour</option>
+              <option value="1" selected>1 hour</option>
               <option value="3">3 hours</option>
-              <option value="6" selected>6 hours</option>
+              <option value="6">6 hours</option>
               <option value="12">12 hours</option>
               <option value="24">24 hours</option>
             </select>
@@ -322,14 +326,56 @@
           </div>
         </div>
 
+        <!-- Recordings: cached Chatterbox TTS audio -->
+        <div id="pane-recordings" class="hidden flex flex-col min-h-0 h-full">
+          <div class="flex flex-wrap items-center gap-2 mb-2 text-xs">
+            <span class="text-[#6b7280]">Cached TTS audio in</span>
+            <span class="font-mono text-[#c0c5d1]">localrecordings/</span>
+            <button type="button" onclick="loadRecordings(true)"
+              class="px-2 py-1 rounded border border-[#4a5263] text-[#9ca3af] hover:text-white">
+              Refresh
+            </button>
+            <button type="button" id="recordings-delete-btn" onclick="deleteSelectedRecordings()" disabled
+              class="px-2 py-1 rounded border border-[#7f1d1d] text-[#fca5a5] hover:text-white hover:border-red-500 disabled:opacity-40 disabled:cursor-not-allowed">
+              Delete selected
+            </button>
+            <span id="recordings-status" class="text-[#6b7280] ml-1"></span>
+          </div>
+          <p class="text-[10px] text-[#6b7280] mb-2">
+            Select recordings to delete. Event alerts and manual Speak tests are cached here — play, download, or remove.
+          </p>
+          <div class="overflow-auto flex-1 max-h-[calc(100vh-260px)]">
+            <table class="data-table w-full text-xs border-collapse" id="recordings-table">
+              <thead>
+                <tr class="text-left text-[#6b7280] border-b border-[#4a5263]">
+                  <th class="w-8 min-w-8 text-center">
+                    <input type="checkbox" id="recordings-select-all" title="Select all"
+                      onchange="selectAllRecordings(this.checked)"
+                      class="accent-[#6366f1] cursor-pointer" />
+                  </th>
+                  <th class="w-28 min-w-28">Time</th>
+                  <th class="min-w-[200px]">Message</th>
+                  <th class="w-36">Voice</th>
+                  <th class="w-16">Size</th>
+                  <th class="w-28">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="recordings-tbody" class="font-mono text-[11px]">
+                <tr><td colspan="6" class="text-[#6b7280] py-2">Open this tab or click Refresh to load recordings.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <audio id="recordings-player" class="hidden" preload="none"></audio>
+        </div>
+
         <!-- GenAI Log: chronological messages, newest first -->
         <div id="pane-genai-log" class="hidden flex flex-col min-h-0 h-full">
           <div class="flex flex-wrap items-center gap-2 mb-2 text-xs">
             <span class="text-[#6b7280]">GenAI messages from the last</span>
             <select id="genai-log-hours" class="bg-[#161b26] border border-[#4a5263] rounded px-2 py-1 text-[#c0c5d1]">
-              <option value="1">1 hour</option>
+              <option value="1" selected>1 hour</option>
               <option value="3">3 hours</option>
-              <option value="6" selected>6 hours</option>
+              <option value="6">6 hours</option>
               <option value="12">12 hours</option>
               <option value="24">24 hours</option>
             </select>
@@ -510,6 +556,9 @@
       // Lazy init health charts when tab shown (so container has size)
       if (name === 'genai-log') {
         loadGenaiLog();
+      }
+      if (name === 'recordings') {
+        loadRecordings(false);
       }
       if (name === 'summary') {
         syncSummaryReportLayout();
@@ -756,6 +805,20 @@
         lines.push(`<div><span class="text-[#6b7280]">Frigate GenAI:</span> ${en}${prov}${mdl}</div>`);
       } else if (fg) {
         lines.push('<div><span class="text-[#6b7280]">Frigate GenAI:</span> not in Frigate config</div>');
+      }
+
+      const frp = gh.frigate_review_probe;
+      if (frp && frp.reviews_1h != null) {
+        const withG = frp.reviews_with_genai_1h ?? 0;
+        const total = frp.reviews_1h ?? 0;
+        const done = frp.reviews_completed_1h ?? 0;
+        const cls = withG > 0 ? 'good' : (done > 0 ? 'warn' : 'dim');
+        lines.push(
+          `<div><span class="text-[#6b7280]">Frigate reviews (1h):</span> `
+          + `<span class="${cls}">${withG}/${total} with GenAI metadata</span>`
+          + (done ? ` · ${done} completed` : '')
+          + `</div>`
+        );
       }
 
       if (gh.checked_at) {
@@ -1156,7 +1219,9 @@
       },
 
       configureChatterbox(cfg) {
-        this.ttsEventAlerts = !!(cfg && cfg.enabled && cfg.event_alerts);
+        this.ttsEventAlerts = !!(
+          cfg && cfg.enabled && (cfg.event_alerts || cfg.timeline_alerts)
+        );
       },
 
       async refreshSoundCatalog() {
@@ -1315,7 +1380,7 @@
       async playAlert(item) {
         if (this.ttsEventAlerts && item && item.tts_text) {
           try {
-            await playTtsAudio(item.tts_text);
+            await playTtsAudio(item.tts_text, getSelectedChatterboxVoice());
             return;
           } catch (e) {
             // fall through to MP3/chime
@@ -1413,6 +1478,19 @@
       return parseChatterboxVoiceValue(sel.value);
     }
 
+    async function syncChatterboxVoiceToServer(voice) {
+      if (!voice || !voice.voice_mode || !voice.voice) return;
+      try {
+        await fetch('/api/tts/voice', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(voice),
+        });
+      } catch (e) {
+        // non-fatal; browser still passes voice on speak/play
+      }
+    }
+
     async function loadChatterboxVoices(force) {
       const sel = document.getElementById('chatterbox-tts-voice-select');
       const status = document.getElementById('chatterbox-tts-status');
@@ -1459,7 +1537,11 @@
 
         const saved = localStorage.getItem(CHATTERBOX_VOICE_STORAGE_KEY);
         const def = data.default || {};
-        const preferred = saved
+        const chosen = data.chosen || {};
+        const preferred = (chosen.voice_mode && chosen.voice
+          ? chatterboxVoiceOptionValue(chosen.voice_mode, chosen.voice)
+          : null)
+          || saved
           || chatterboxVoiceOptionValue(def.voice_mode || 'clone', def.voice || '');
         let matched = false;
         for (const opt of sel.options) {
@@ -1473,9 +1555,14 @@
           sel.selectedIndex = 0;
         }
 
-        sel.onchange = () => {
-          if (sel.value) localStorage.setItem(CHATTERBOX_VOICE_STORAGE_KEY, sel.value);
+        const applyVoiceSelection = () => {
+          if (!sel.value) return;
+          localStorage.setItem(CHATTERBOX_VOICE_STORAGE_KEY, sel.value);
+          const voice = parseChatterboxVoiceValue(sel.value);
+          syncChatterboxVoiceToServer(voice);
         };
+        sel.onchange = applyVoiceSelection;
+        applyVoiceSelection();
 
         if (force && status) status.textContent = '';
       } catch (e) {
@@ -1491,10 +1578,13 @@
       if (EventAlertAudio.ensureContext() && EventAlertAudio.ctx.state === 'suspended') {
         await EventAlertAudio.ctx.resume();
       }
+      const voice = (voiceOverride && voiceOverride.voice_mode && voiceOverride.voice)
+        ? voiceOverride
+        : getSelectedChatterboxVoice();
       const payload = { text: message };
-      if (voiceOverride && voiceOverride.voice_mode && voiceOverride.voice) {
-        payload.voice_mode = voiceOverride.voice_mode;
-        payload.voice = voiceOverride.voice;
+      if (voice && voice.voice_mode && voice.voice) {
+        payload.voice_mode = voice.voice_mode;
+        payload.voice = voice.voice;
       }
       const r = await fetch('/api/tts/speak', {
         method: 'POST',
@@ -2206,6 +2296,222 @@
         if (!silent && btn) btn.disabled = false;
       }
     }
+
+    let recordingsPlayingFilename = null;
+    const recordingsSelected = new Set();
+    let recordingsListCache = [];
+
+    function formatFileSize(bytes) {
+      const n = Number(bytes) || 0;
+      if (n < 1024) return `${n} B`;
+      if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+      return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    function recordingUrl(filename, download) {
+      const q = download ? '?download=1' : '';
+      return `/api/recordings/${encodeURIComponent(filename)}${q}`;
+    }
+
+    function setRecordingsPlayState(filename, playing) {
+      document.querySelectorAll('[data-recording-play]').forEach(btn => {
+        const name = btn.getAttribute('data-recording-play');
+        if (name === filename && playing) {
+          btn.textContent = 'Stop';
+          btn.classList.add('text-amber-400');
+        } else {
+          btn.textContent = 'Play';
+          btn.classList.remove('text-amber-400');
+        }
+      });
+    }
+
+    function stopRecordingPlayback() {
+      const player = document.getElementById('recordings-player');
+      if (!player) return;
+      player.pause();
+      player.removeAttribute('src');
+      player.load();
+      setRecordingsPlayState(recordingsPlayingFilename, false);
+      recordingsPlayingFilename = null;
+    }
+
+    async function playRecording(filename) {
+      const player = document.getElementById('recordings-player');
+      if (!player || !filename) return;
+      if (recordingsPlayingFilename === filename && !player.paused) {
+        stopRecordingPlayback();
+        return;
+      }
+      stopRecordingPlayback();
+      recordingsPlayingFilename = filename;
+      player.src = recordingUrl(filename, false);
+      setRecordingsPlayState(filename, true);
+      try {
+        await player.play();
+      } catch (e) {
+        stopRecordingPlayback();
+        const status = document.getElementById('recordings-status');
+        if (status) status.textContent = 'Playback blocked — interact with the page first.';
+      }
+    }
+
+    function updateRecordingsSelectionUi() {
+      const btn = document.getElementById('recordings-delete-btn');
+      const selAll = document.getElementById('recordings-select-all');
+      const n = recordingsSelected.size;
+      if (btn) {
+        btn.disabled = n === 0;
+        btn.textContent = n ? `Delete selected (${n})` : 'Delete selected';
+      }
+      if (selAll && recordingsListCache.length) {
+        const allOnPage = recordingsListCache.every(r => recordingsSelected.has(r.filename));
+        const some = recordingsListCache.some(r => recordingsSelected.has(r.filename));
+        selAll.checked = allOnPage;
+        selAll.indeterminate = some && !allOnPage;
+      } else if (selAll) {
+        selAll.checked = false;
+        selAll.indeterminate = false;
+      }
+    }
+
+    function toggleRecordingSelect(filename, checked) {
+      if (!filename) return;
+      if (checked) recordingsSelected.add(filename);
+      else recordingsSelected.delete(filename);
+      updateRecordingsSelectionUi();
+    }
+
+    function selectAllRecordings(checked) {
+      if (!recordingsListCache.length) return;
+      if (checked) {
+        recordingsListCache.forEach(r => {
+          if (r.filename) recordingsSelected.add(r.filename);
+        });
+      } else {
+        recordingsListCache.forEach(r => {
+          if (r.filename) recordingsSelected.delete(r.filename);
+        });
+      }
+      document.querySelectorAll('[data-recording-select]').forEach(cb => {
+        cb.checked = checked;
+      });
+      updateRecordingsSelectionUi();
+    }
+
+    async function deleteSelectedRecordings() {
+      const names = Array.from(recordingsSelected);
+      if (!names.length) return;
+      if (!confirm(`Delete ${names.length} recording(s)? This cannot be undone.`)) return;
+      const status = document.getElementById('recordings-status');
+      const btn = document.getElementById('recordings-delete-btn');
+      if (btn) btn.disabled = true;
+      if (status) status.textContent = `Deleting ${names.length}…`;
+      if (recordingsPlayingFilename && names.includes(recordingsPlayingFilename)) {
+        stopRecordingPlayback();
+      }
+      try {
+        const r = await fetch('/api/recordings/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filenames: names }),
+        });
+        const data = await r.json();
+        if (!r.ok || !data.ok) {
+          throw new Error((data && data.error) || `HTTP ${r.status}`);
+        }
+        (data.deleted || []).forEach(f => recordingsSelected.delete(f));
+        await loadRecordings(true);
+        const errCount = Object.keys(data.errors || {}).length;
+        if (status) {
+          status.textContent = errCount
+            ? `Deleted ${(data.deleted || []).length}; ${errCount} failed`
+            : `${data.remaining ?? recordingsListCache.length} file(s)`;
+        }
+      } catch (e) {
+        if (status) status.textContent = `Delete failed: ${e.message || e}`;
+        updateRecordingsSelectionUi();
+      }
+    }
+
+    function renderRecordings(recordings) {
+      const tbody = document.getElementById('recordings-tbody');
+      if (!tbody) return;
+      recordingsListCache = recordings || [];
+      const known = new Set(recordingsListCache.map(r => r.filename).filter(Boolean));
+      Array.from(recordingsSelected).forEach(f => {
+        if (!known.has(f)) recordingsSelected.delete(f);
+      });
+      if (!recordingsListCache.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-[#6b7280] py-2">No recordings yet. Enable Chatterbox TTS and trigger event alerts or use Speak on Overview.</td></tr>';
+        updateRecordingsSelectionUi();
+        return;
+      }
+      tbody.innerHTML = recordingsListCache.map(r => {
+        const when = formatLocalTime(r.modified_at);
+        const msg = escapeHtml(r.message || r.filename || '');
+        const voice = escapeHtml(r.voice || '—');
+        const size = formatFileSize(r.size_bytes);
+        const file = r.filename || '';
+        const fileAttr = escapeHtml(file);
+        const checked = recordingsSelected.has(file) ? ' checked' : '';
+        const rowSel = `<input type="checkbox" data-recording-select="${fileAttr}" data-file="${fileAttr}"${checked}
+          onchange="toggleRecordingSelect(this.dataset.file, this.checked)"
+          class="accent-[#6366f1] cursor-pointer" />`;
+        const playBtn = `<button type="button" data-recording-play="${fileAttr}" data-file="${fileAttr}"
+          onclick="playRecording(this.dataset.file)"
+          class="text-[#a5b4fc] hover:text-white mr-2">Play</button>`;
+        const dlBtn = `<a href="${recordingUrl(file, true)}" download="${fileAttr}"
+          class="text-[#9ca3af] hover:text-white">Download</a>`;
+        return `<tr class="border-b border-[#272e3b]">
+          <td class="text-center">${rowSel}</td>
+          <td class="text-[#6b7280] whitespace-nowrap">${when}</td>
+          <td class="text-[#e5e7eb]">${msg}</td>
+          <td class="text-[#9ca3af]">${voice}</td>
+          <td class="text-[#6b7280]">${size}</td>
+          <td>${playBtn}${dlBtn}</td>
+        </tr>`;
+      }).join('');
+      if (recordingsPlayingFilename) {
+        setRecordingsPlayState(recordingsPlayingFilename, true);
+      }
+      updateRecordingsSelectionUi();
+    }
+
+    async function loadRecordings(force) {
+      const status = document.getElementById('recordings-status');
+      if (status && (force || !status.textContent)) status.textContent = 'Loading…';
+      try {
+        const r = await fetch('/api/recordings');
+        const data = await r.json();
+        if (!r.ok || !data.ok) {
+          throw new Error((data && data.error) || `HTTP ${r.status}`);
+        }
+        renderRecordings(data.recordings || []);
+        const sel = recordingsSelected.size;
+        if (status) {
+          status.textContent = sel
+            ? `${data.total || 0} file(s) · ${sel} selected`
+            : `${data.total || 0} file(s)`;
+        }
+      } catch (e) {
+        if (status) status.textContent = `Failed: ${e.message || e}`;
+        renderRecordings([]);
+      }
+    }
+
+    (function initRecordingsPlayer() {
+      const player = document.getElementById('recordings-player');
+      if (!player) return;
+      player.addEventListener('ended', () => stopRecordingPlayback());
+      player.addEventListener('pause', () => {
+        if (player.ended || !player.src) return;
+        if (player.currentTime > 0 && player.paused) {
+          setRecordingsPlayState(recordingsPlayingFilename, false);
+          recordingsPlayingFilename = null;
+        }
+      });
+    })();
 
     async function loadGenaiLog() {
       const status = document.getElementById('genai-log-status');

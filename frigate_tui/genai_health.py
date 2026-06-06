@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from frigate_tui.genai_report import resolve_llm_settings
+from frigate_tui.models import genai_summary_from_review_data
 
 
 def _model_listed(model: str, names: list[str]) -> bool:
@@ -169,6 +170,29 @@ def activity_stats(genai_activity: list[dict[str, Any]], hours: float = 1.0) -> 
     }
 
 
+def frigate_review_genai_probe(
+    reviews: list[dict[str, Any]],
+    *,
+    hours: float = 1.0,
+) -> dict[str, Any]:
+    """How many recent Frigate /api/review items include GenAI metadata."""
+    now = time.time()
+    cutoff = now - max(0.25, hours) * 3600.0
+    recent = [r for r in reviews if float(r.get("start_time") or 0) >= cutoff]
+    with_genai = 0
+    completed = 0
+    for raw in recent:
+        if raw.get("end_time") is not None:
+            completed += 1
+        if genai_summary_from_review_data(raw.get("data") or {}):
+            with_genai += 1
+    return {
+        "reviews_1h": len(recent),
+        "reviews_completed_1h": completed,
+        "reviews_with_genai_1h": with_genai,
+    }
+
+
 def _overall_status(
     *,
     demo: bool,
@@ -177,6 +201,7 @@ def _overall_status(
     ingestion: dict[str, Any],
     activity: dict[str, Any],
     frigate_genai: dict[str, Any] | None,
+    frigate_review_probe: dict[str, Any] | None = None,
 ) -> tuple[str, str, str]:
     """Return (status, status_color, summary)."""
     if demo:
@@ -208,9 +233,25 @@ def _overall_status(
         color = "warn"
 
     if activity.get("messages_1h", 0) == 0 and not demo:
-        issues.append("no GenAI messages in the last hour")
-        if color == "good":
+        probe = frigate_review_probe or {}
+        completed = int(probe.get("reviews_completed_1h") or 0)
+        with_genai = int(probe.get("reviews_with_genai_1h") or 0)
+        if completed > 0 and with_genai == 0:
+            issues.append(
+                "no GenAI messages in the last hour — Frigate reviews lack metadata "
+                "(check Frigate logs: Ollama timeouts or num_ctx too small for preview frames)"
+            )
             color = "warn"
+        elif int(probe.get("reviews_1h") or 0) > 0 and with_genai == 0:
+            issues.append(
+                "no GenAI messages in the last hour — Frigate has not written review metadata yet"
+            )
+            if color == "good":
+                color = "warn"
+        else:
+            issues.append("no GenAI messages in the last hour")
+            if color == "good":
+                color = "warn"
 
     if not issues:
         return "ok", color, "GenAI pipeline healthy"
@@ -227,6 +268,7 @@ async def collect_genai_health(
     mqtt_connected: bool,
     use_mqtt_for_events: bool,
     frigate_config: dict[str, Any] | None = None,
+    frigate_review_probe: dict[str, Any] | None = None,
     llm_probe_timeout: float = 8.0,
 ) -> dict[str, Any]:
     """Build a JSON-serializable GenAI health snapshot."""
@@ -269,6 +311,7 @@ async def collect_genai_health(
         ingestion=ingestion,
         activity=activity,
         frigate_genai=frigate_genai,
+        frigate_review_probe=frigate_review_probe,
     )
 
     return {
@@ -279,6 +322,7 @@ async def collect_genai_health(
         "llm": llm,
         "llm_probe": llm_probe,
         "frigate_genai": frigate_genai,
+        "frigate_review_probe": frigate_review_probe,
         "ingestion": ingestion,
         "activity": activity,
     }
