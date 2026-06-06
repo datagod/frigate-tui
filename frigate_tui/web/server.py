@@ -97,6 +97,10 @@ async def lifespan(app: FastAPI):
                         "status_color": payload.status_color,
                     }
                     asyncio.create_task(broadcaster.publish({"type": "health", "data": h}))
+            elif kind == "genai_health":
+                asyncio.create_task(
+                    broadcaster.publish({"type": "genai_health", "data": payload or {}})
+                )
             elif kind == "event_alerts":
                 asyncio.create_task(
                     broadcaster.publish({"type": "event_alerts", "data": payload or []})
@@ -209,7 +213,7 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
     async def api_set_poll_interval(request: Request):
         try:
             body = await request.json()
-            interval = float(body.get("interval", 1.0))
+            interval = float(body.get("interval", 5.0))
             core.set_poll_interval(interval)
             return JSONResponse({"ok": True, "poll_interval": core.poll_interval})
         except Exception as e:
@@ -231,6 +235,13 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
         core.add_log(message, level)
         return JSONResponse({"ok": True})
 
+    @app.get("/api/genai/health")
+    async def api_genai_health(refresh: bool = False):
+        """GenAI pipeline + LLM endpoint health for the Health tab."""
+        if refresh or not core.genai_health:
+            await core.refresh_genai_health(force=True)
+        return JSONResponse({"ok": True, "health": core.genai_health or {}})
+
     @app.get("/api/genai/activity")
     async def api_genai_activity(hours: float | None = None):
         """Structured GenAI messages from the last N hours, grouped by hour."""
@@ -245,6 +256,33 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
         hrs = max(0.25, min(72.0, float(hours if hours is not None else core.genai_report_default_hours)))
         messages = core.get_genai_messages(hrs)
         return JSONResponse({"ok": True, "hours": hrs, "total": len(messages), "messages": messages})
+
+    @app.post("/api/genai/frigate-report")
+    async def api_genai_frigate_report(request: Request):
+        """Frigate native GenAI review summarize report (suspicious review items)."""
+        hrs = core.genai_report_default_hours
+        try:
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            hrs = max(0.25, min(24.0, float(body.get("hours", core.genai_report_default_hours))))
+            result = await core.generate_frigate_review_report(hrs)
+            status = 200 if result.get("ok") else 400
+            return JSONResponse(result, status_code=status)
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+            core.add_log(f"Frigate report failed (API): {err}", "error")
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": err,
+                    "hours": hrs,
+                    "summary": None,
+                    "logged": True,
+                },
+                status_code=500,
+            )
 
     @app.post("/api/genai/report")
     async def api_genai_report(request: Request):

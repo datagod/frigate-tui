@@ -2,7 +2,7 @@
 # Copy to config.yaml (next to this file) or place at ~/.config/frigate-tui/config.yaml
 
 frigate_url: "http://localhost:5000"   # or http://your-frigate-host:5000
-poll_interval: 1.0                     # seconds between /api/stats refreshes (and rendering). Can be changed live in the web UI.
+poll_interval: 5.0                     # seconds between /api/stats refreshes (web UI control uses 1s steps)
 review_interval: 8.0                   # seconds between review polls (for activity log)
 timeline_interval: 5.0                 # seconds between timeline polls (for activity log)
 timeline_log_enabled: true             # false = no Visible/Gone/Stationary lines in Activity Log
@@ -38,14 +38,18 @@ genai_report:
   base_url: http://ollama:11434
   model: llama3.2:latest
   timeout: 180
+  health_probe_timeout: 8          # LLM reachability check on Health tab (seconds)
+
+genai_health_interval: 30          # seconds between automatic GenAI health probes
 
 # Web UI alert sounds (browser only; queued playback). Place MP3/WAV files in ./sounds/
 web_alerts:
   enabled: true
   max_queue: 24
   sounds:
-    default: event.mp3       # fallback when a kind has no mapping
-    event: event.mp3         # new Frigate detection (SSE event_alerts)
+    default: ""              # built-in chime when no mapping / unknown kind
+    event: Alert.mp3         # new detection (non-dog)
+    dog: DogDetected.mp3     # label/sub_label matches dog
     # review: review.mp3     # future: review / GenAI notifications
     # notification: ping.mp3
 

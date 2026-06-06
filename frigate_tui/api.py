@@ -41,6 +41,20 @@ class FrigateClient:
             return resp.json()
         return resp.text.strip()
 
+    async def _post_json(
+        self,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> Any:
+        url = f"{self.base_url}{path}"
+        resp = await self._client.post(url, json=json_body or {}, timeout=timeout)
+        resp.raise_for_status()
+        if resp.headers.get("content-type", "").startswith("application/json"):
+            return resp.json()
+        return resp.text.strip()
+
     async def get_version(self) -> str:
         try:
             return await self._get("/api/version")
@@ -94,6 +108,18 @@ class FrigateClient:
         resp = await self._client.get(url, params=params or None)
         resp.raise_for_status()
         return resp.content
+
+    async def summarize_reviews(
+        self,
+        *,
+        start_ts: float,
+        end_ts: float,
+        timeout: float = 180.0,
+    ) -> dict[str, Any]:
+        """Frigate GenAI: narrative report for suspicious review items in a time window."""
+        path = f"/api/review/summarize/start/{start_ts}/end/{end_ts}"
+        data = await self._post_json(path, json_body={}, timeout=timeout)
+        return data if isinstance(data, dict) else {"success": False, "summary": str(data)}
 
     async def get_clip(self, event_id: str) -> bytes:
         """Fetch the clip (mp4) for an event, if available."""

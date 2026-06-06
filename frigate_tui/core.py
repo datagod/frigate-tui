@@ -21,6 +21,7 @@ from typing import Any, Callable, Awaitable
 from frigate_tui import __version__
 from frigate_tui.api import FrigateClient
 from frigate_tui.genai_activity import group_by_hour, list_chronological, make_activity_record
+from frigate_tui.genai_health import collect_genai_health
 from frigate_tui.genai_report import generate_activity_report, resolve_llm_settings
 from frigate_tui.models import (
     CameraStats,
@@ -45,6 +46,12 @@ except ImportError:
     FrigateMqttEvent = None  # type: ignore
     MQTT_AVAILABLE = False
 
+from frigate_tui.web.sounds_util import (
+    DEFAULT_DOG_SOUND,
+    DEFAULT_EVENT_SOUND,
+    event_alert_sound_key,
+)
+
 
 class FrigateMonitorCore:
     """Headless core that owns Frigate data fetching, state, and live updates.
@@ -61,7 +68,7 @@ class FrigateMonitorCore:
     def __init__(self, settings: dict[str, Any] | None = None) -> None:
         s = settings or {}
         self.frigate_url: str = str(s.get("frigate_url", "http://localhost:5000")).rstrip("/")
-        self.poll_interval: float = float(s.get("poll_interval", 1.0))
+        self.poll_interval: float = float(s.get("poll_interval", 5.0))
         self.review_interval: float = float(s.get("review_interval", 8.0))
         self.timeline_interval: float = float(s.get("timeline_interval", 5.0))
         self.stats_log_interval: float = float(s.get("stats_log_interval", 600.0))
@@ -89,10 +96,9 @@ class FrigateMonitorCore:
             else {}
         )
         if "default" not in self.web_alerts_sounds:
-            self.web_alerts_sounds.setdefault(
-                "default", self.web_alerts_sounds.get("event", "event.mp3")
-            )
-        self.web_alerts_sounds.setdefault("event", self.web_alerts_sounds["default"])
+            self.web_alerts_sounds.setdefault("default", "")
+        self.web_alerts_sounds.setdefault("event", DEFAULT_EVENT_SOUND)
+        self.web_alerts_sounds.setdefault("dog", DEFAULT_DOG_SOUND)
         self._genai_activity_hours_keep: float = float(
             s.get("genai_activity_hours_keep", 48.0)
         )
@@ -109,6 +115,12 @@ class FrigateMonitorCore:
         self._frigate_version: str = "?"
         self._mqtt_client: FrigateMqttClient | None = None
         self._mqtt_task: asyncio.Task | None = None
+        self.mqtt_connected: bool = False
+        self.genai_health: dict[str, Any] | None = None
+        self._frigate_config_cache: dict[str, Any] | None = None
+        self._frigate_config_cached_at: float = 0.0
+        self._last_genai_health_check: float = 0.0
+        self._genai_health_interval: float = float(s.get("genai_health_interval", 30.0))
         self._event_polling_active: bool = False
 
         # Cursors for incremental fetch (exact same semantics as TUI)
@@ -288,6 +300,7 @@ class FrigateMonitorCore:
                 "max_queue": self.web_alerts_max_queue,
                 "sounds": dict(self.web_alerts_sounds),
             },
+            "genai_health": self.genai_health,
         }
 
     # ------------------------------------------------------------------
@@ -361,6 +374,7 @@ class FrigateMonitorCore:
             )
 
         self._log_genai_monitoring_mode()
+        asyncio.create_task(self.refresh_genai_health(force=True))
 
         # Higher-level signals (only used for activity log, same as TUI)
         # These are fixed but could be made dynamic via self.review_interval etc if needed
@@ -424,8 +438,8 @@ class FrigateMonitorCore:
         """Change the main polling speed at runtime (affects stats + events polling rate).
         Reviews and timeline use their own *_interval attrs (also overridable in config)."""
         old = self.poll_interval
-        self.poll_interval = max(0.1, float(interval))
-        self.add_log(f"Poll interval set to {self.poll_interval:.1f}s (was {old:.1f}s)", "info")
+        self.poll_interval = max(1.0, round(float(interval)))
+        self.add_log(f"Poll interval set to {self.poll_interval:.0f}s (was {old:.0f}s)", "info")
         self._notify("poll_interval", self.poll_interval)
 
     async def _interval_loop(
@@ -674,6 +688,79 @@ class FrigateMonitorCore:
             "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         }
 
+    async def generate_frigate_review_report(self, hours: float | None = None) -> dict[str, Any]:
+        """Request Frigate's native GenAI review summarize report for a time window."""
+        hrs = hours if hours is not None else self.genai_report_default_hours
+        end_ts = time.time()
+        start_ts = end_ts - hrs * 3600.0
+        if self.demo:
+            summary = (
+                "Demo mode: no suspicious review activity was flagged in this window. "
+                "Frigate's native report summarizes alert-level review GenAI summaries."
+            )
+            return {
+                "ok": True,
+                "demo": True,
+                "hours": hrs,
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "summary": summary,
+                "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            }
+        if not self._client:
+            return {
+                "ok": False,
+                "error": "Frigate client not available.",
+                "hours": hrs,
+                "summary": None,
+                "logged": True,
+            }
+        timeout = float(self.genai_report_config.get("timeout", 180))
+        self.add_log(
+            f"Frigate report: requesting review summarize for the last {hrs:g}h",
+            "info",
+        )
+        try:
+            result = await self._client.summarize_reviews(
+                start_ts=start_ts,
+                end_ts=end_ts,
+                timeout=timeout,
+            )
+        except Exception as e:
+            err = self._format_connection_error(e)
+            self.add_log(f"Frigate report failed: {err}", "error")
+            return {
+                "ok": False,
+                "error": err,
+                "hours": hrs,
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "summary": None,
+                "logged": True,
+            }
+        if not result.get("success"):
+            err = str(result.get("message") or result.get("error") or "Frigate summarize failed")
+            self.add_log(f"Frigate report failed: {err}", "error")
+            return {
+                "ok": False,
+                "error": err,
+                "hours": hrs,
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "summary": result.get("summary"),
+                "logged": True,
+            }
+        summary = str(result.get("summary") or "").strip()
+        self.add_log(f"Frigate report ready ({hrs:g}h)", "success")
+        return {
+            "ok": True,
+            "hours": hrs,
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "summary": summary,
+            "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+
     async def _backfill_genai_activity(self) -> None:
         """Seed history from recent Frigate reviews that already have GenAI metadata."""
         if self.demo or not self._client:
@@ -783,6 +870,54 @@ class FrigateMonitorCore:
             self._log_llm_description(e, source="startup")
 
     # ------------------------------------------------------------------
+    # GenAI health (LLM probe + ingestion + message activity)
+    # ------------------------------------------------------------------
+
+    async def _get_frigate_config_cached(self, max_age: float = 300.0) -> dict[str, Any] | None:
+        now = time.time()
+        if self._frigate_config_cache is not None and (now - self._frigate_config_cached_at) < max_age:
+            return self._frigate_config_cache
+        if self.demo or not self._client or not self.connection_ok:
+            return self._frigate_config_cache
+        try:
+            cfg = await self._client.get_config()
+            if isinstance(cfg, dict):
+                self._frigate_config_cache = cfg
+                self._frigate_config_cached_at = now
+        except Exception:
+            pass
+        return self._frigate_config_cache
+
+    async def refresh_genai_health(self, *, force: bool = False) -> dict[str, Any]:
+        """Probe LLM and summarize GenAI ingestion; notify listeners."""
+        frigate_cfg = await self._get_frigate_config_cached()
+        timeout = float(self.genai_report_config.get("health_probe_timeout", 8.0))
+        health = await collect_genai_health(
+            demo=self.demo,
+            genai_report_config=self.genai_report_config,
+            genai_activity=self.genai_activity,
+            mqtt_configured=bool(self.mqtt_config),
+            mqtt_available=MQTT_AVAILABLE,
+            mqtt_connected=self.mqtt_connected,
+            use_mqtt_for_events=self._use_mqtt_for_events,
+            frigate_config=frigate_cfg,
+            llm_probe_timeout=timeout,
+        )
+        self.genai_health = health
+        self._last_genai_health_check = time.time()
+        self._notify("genai_health", health)
+        return health
+
+    async def _maybe_refresh_genai_health(self) -> None:
+        if self.demo:
+            if not self.genai_health:
+                await self.refresh_genai_health(force=True)
+            return
+        elapsed = time.time() - self._last_genai_health_check
+        if elapsed >= self._genai_health_interval:
+            await self.refresh_genai_health()
+
+    # ------------------------------------------------------------------
     # Stats (always running, drives summary + cameras + health + conn)
     # ------------------------------------------------------------------
 
@@ -854,6 +989,7 @@ class FrigateMonitorCore:
         self._notify("stats", stats)
         self._notify("cameras", self.cameras)
         self._notify("health", self.health)
+        await self._maybe_refresh_genai_health()
         self._update_connection_state()
 
         # Throttled success logging + immediate errors (exact same rules)
@@ -942,7 +1078,7 @@ class FrigateMonitorCore:
                         "id": e.id,
                         "camera": e.camera,
                         "label": e.display_label or e.label,
-                        "sound": "event",
+                        "sound": event_alert_sound_key(e.label, e.sub_label),
                     }
                     for e in new_only
                 ],
@@ -1192,6 +1328,7 @@ class FrigateMonitorCore:
 
             async with self._mqtt_client:
                 connected = await self._mqtt_client.wait_until_connected(timeout=8.0)
+                self.mqtt_connected = bool(connected)
                 if connected:
                     self.add_log(
                         "MQTT connected — events, GenAI object descriptions (tracked_object_update), "
@@ -1240,6 +1377,7 @@ class FrigateMonitorCore:
                         continue
 
         except Exception as e:
+            self.mqtt_connected = False
             err = str(e)
             is_dns_error = (
                 "Name or service not known" in err
@@ -1267,6 +1405,9 @@ class FrigateMonitorCore:
                 if not is_dns_error:
                     # For other errors, keep the original short fallback notice
                     self.add_log("MQTT failed — falling back to event polling", "warning")
+        finally:
+            self.mqtt_connected = False
+            asyncio.create_task(self.refresh_genai_health(force=True))
 
     def _handle_review_mqtt_update(self, payload: dict) -> None:
         """Handle frigate/reviews MQTT when GenAI metadata is attached to a review."""

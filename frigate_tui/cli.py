@@ -86,7 +86,7 @@ def run(
     yaml_cfg = _load_yaml_config(config)
 
     final_url = url or yaml_cfg.get("frigate_url") or os.getenv("FRIGATE_TUI_URL") or "http://localhost:5000"
-    final_interval = interval or yaml_cfg.get("poll_interval") or 1.0
+    final_interval = interval or yaml_cfg.get("poll_interval") or 5.0
     stats_log_interval = yaml_cfg.get("stats_log_interval", 600.0)
     max_events = yaml_cfg.get("max_events", 150)
     review_interval = yaml_cfg.get("review_interval", 8.0)
@@ -157,7 +157,7 @@ def web(
     yaml_cfg = _load_yaml_config(config)
 
     final_url = url or yaml_cfg.get("frigate_url") or os.getenv("FRIGATE_TUI_URL") or "http://localhost:5000"
-    final_interval = interval or yaml_cfg.get("poll_interval") or 1.0
+    final_interval = interval or yaml_cfg.get("poll_interval") or 5.0
     stats_log_interval = yaml_cfg.get("stats_log_interval", 600.0)
     max_events = yaml_cfg.get("max_events", 150)
     review_interval = yaml_cfg.get("review_interval", 8.0)

@@ -249,12 +249,15 @@ web_alerts:
   enabled: true
   max_queue: 24
   sounds:
-    default: event.mp3
-    event: event.mp3
+    default: ""              # built-in chime for unmapped kinds
+    event: Alert.mp3         # new detection (non-dog)
+    dog: DogDetected.mp3     # dog label / sub_label
     # review: review.mp3
 ```
 
-Files are served at `/sounds/<filename>`. List available files: `GET /api/sounds`. If a mapped file is missing, a built-in chime is used instead.
+New events play **Alert.mp3**; labels matching dog (e.g. `dog`, `Dog`, `person (dog)`) play **DogDetected.mp3**. Unmapped kinds and missing files fall back to a built-in chime.
+
+Files are served at `/sounds/<filename>`. List available files: `GET /api/sounds`.
 
 ### Why a web UI?
 

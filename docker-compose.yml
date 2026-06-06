@@ -22,7 +22,7 @@ services:
       # Because we're sharing the frigate container's network namespace,
       # we talk to it via localhost.
       - FRIGATE_TUI_URL=${FRIGATE_TUI_URL:-http://localhost:5000}
-      - FRIGATE_TUI_INTERVAL=${FRIGATE_TUI_INTERVAL:-1.0}
+      - FRIGATE_TUI_INTERVAL=${FRIGATE_TUI_INTERVAL:-5.0}
       # Optional: NO_COLOR=1 to disable colors if needed
       # - NO_COLOR=${NO_COLOR:-}
 
@@ -76,7 +76,7 @@ services:
       #   - http://host.docker.internal:5000   (fallback)
       #   - http://192.168.1.50:5000           (your actual Frigate LAN IP)
       - FRIGATE_TUI_URL=${FRIGATE_TUI_URL:-http://frigate:5000}
-      - FRIGATE_TUI_INTERVAL=${FRIGATE_TUI_INTERVAL:-1.0}
+      - FRIGATE_TUI_INTERVAL=${FRIGATE_TUI_INTERVAL:-5.0}
 
     volumes:
       - ./config.yaml:/app/config.yaml:ro

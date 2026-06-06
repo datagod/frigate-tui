@@ -3,7 +3,35 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+_DOG_LABEL_RE = re.compile(r"\bdogs?\b", re.IGNORECASE)
+
+DEFAULT_EVENT_SOUND = "Alert.mp3"
+DEFAULT_DOG_SOUND = "DogDetected.mp3"
+
+
+def is_dog_label(*labels: str | None) -> bool:
+    """True if any provided label/sub_label looks like a dog detection."""
+    for raw in labels:
+        if not raw:
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        if text.lower() in ("dog", "dogs"):
+            return True
+        if _DOG_LABEL_RE.search(text):
+            return True
+    return False
+
+
+def event_alert_sound_key(label: str | None = None, sub_label: str | None = None) -> str:
+    """Sound map key for a new Frigate event (dog → dog, else → event)."""
+    if is_dog_label(label, sub_label):
+        return "dog"
+    return "event"
 
 _SOUND_EXTENSIONS = {".mp3", ".ogg", ".wav", ".m4a", ".aac", ".webm"}
 

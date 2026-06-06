@@ -100,7 +100,7 @@
     <div class="flex items-center gap-1"><span class="text-[#6b7280] font-semibold">SKIPPED</span> <span id="sum-skipped" class="metric-value">{{ (snapshot.summary.skipped_fps or 0)|round(1) }}</span><canvas id="spark-skipped" width="55" height="16" class="ml-1"></canvas></div>
     <div class="flex items-center gap-1 ml-4 text-xs">
       <span class="text-[#6b7280] font-semibold">POLL</span>
-      <input id="poll-interval" type="number" min="0.1" step="0.1" value="1" class="w-14 bg-[#161b26] border border-[#4a5263] text-xs px-1 py-0.5 rounded" />
+      <input id="poll-interval" type="number" min="1" step="1" value="5" class="w-14 bg-[#161b26] border border-[#4a5263] text-xs px-1 py-0.5 rounded" />
       <span class="text-[#6b7280]">s</span>
     </div>
     <div class="ml-auto text-[10px] text-[#6b7280]">Live via core • SSE • identical logic to TUI</div>
@@ -152,8 +152,8 @@
             behavior are identical to the TUI.<br><br>
             <span class="text-[#c0c5d1]">Sound alerts (web only):</span> new detections play sounds from the
             <span class="font-mono">sounds/</span> folder (MP3/WAV), queued in order. Map alert kinds in
-            <span class="font-mono text-[#a5b4fc]">web_alerts.sounds</span> (e.g. <span class="font-mono">event: event.mp3</span>).
-            Use the <span class="text-white">Alerts</span> header button to enable browser audio. Missing files use a built-in chime.
+            <span class="font-mono text-[#a5b4fc]">web_alerts.sounds</span> (e.g. <span class="font-mono">event: Alert.mp3</span>, <span class="font-mono">dog: DogDetected.mp3</span>).
+            Use the <span class="text-white">Alerts</span> header button to enable browser audio. Unmapped kinds and missing files use a built-in chime.
           </div>
           <div class="mt-4 text-xs text-[#6b7280]">
             Useful keys (global): <span class="font-mono">1-6</span> switch tabs • <span class="font-mono">r</span> refresh • <span class="font-mono">c</span> clear log • <span class="font-mono">p</span> cycle poll • <span class="font-mono">?</span> help<br>
@@ -193,10 +193,10 @@
           </div>
         </div>
 
-        <!-- Summary: LLM narrative for past N hours (default 6) -->
+        <!-- Summary: custom LLM narrative + Frigate native review report -->
         <div id="pane-summary" class="hidden flex flex-col min-h-0 h-full">
           <div class="flex flex-wrap items-center gap-2 mb-2 text-xs">
-            <span class="text-[#6b7280]">Detailed activity summary for the last</span>
+            <span class="text-[#6b7280]">Time range:</span>
             <select id="summary-hours" class="bg-[#161b26] border border-[#4a5263] rounded px-2 py-1 text-[#c0c5d1]">
               <option value="1">1 hour</option>
               <option value="3">3 hours</option>
@@ -208,17 +208,29 @@
               class="px-3 py-1 rounded bg-[#4f46e5] hover:bg-[#6366f1] text-white font-medium">
               Generate Summary
             </button>
-            <span id="summary-status" class="text-[#6b7280] ml-1"></span>
+            <button id="frigate-report-btn" onclick="generateFrigateReport()"
+              class="px-3 py-1 rounded border border-[#4a5263] hover:border-[#6366f1] text-[#c0c5d1] hover:text-white font-medium">
+              Frigate Report
+            </button>
           </div>
-          <p class="text-[10px] text-[#6b7280] mb-2 leading-snug">
-            Uses cameras, object types, and identified names from stored GenAI messages. Hour sections are newest-first.
-          </p>
-          <div id="summary-report-panel" class="hidden flex-1 overflow-auto rounded border border-[#4a5263] bg-[#12151c] p-2 min-h-0">
-            <div class="text-[11px] font-semibold text-[#a5b4fc] mb-1 uppercase tracking-wide">Activity summary</div>
-            <div id="summary-report-text" class="genai-report-md"></div>
+          <div class="flex flex-wrap gap-x-4 gap-y-0.5 text-[10px] text-[#6b7280] mb-2">
+            <span id="summary-status"></span>
+            <span id="frigate-report-status"></span>
           </div>
-          <div id="summary-placeholder" class="text-[#6b7280] text-xs">
-            Choose a time range and click Generate Summary. See the GenAI Log tab for the raw message list.
+          <div class="flex-1 flex flex-col gap-2 min-h-0 overflow-auto">
+            <div id="summary-report-panel" class="hidden flex-1 min-h-[100px] overflow-auto rounded border border-[#4a5263] bg-[#12151c] p-2">
+              <div class="text-[11px] font-semibold text-[#a5b4fc] mb-1 uppercase tracking-wide">Activity summary</div>
+              <p class="text-[10px] text-[#6b7280] mb-1">Custom hourly briefing from stored GenAI messages (frigate-tui LLM).</p>
+              <div id="summary-report-text" class="genai-report-md"></div>
+            </div>
+            <div id="frigate-report-panel" class="hidden flex-1 min-h-[100px] overflow-auto rounded border border-[#4a5263] bg-[#12151c] p-2">
+              <div class="text-[11px] font-semibold text-[#a5b4fc] mb-1 uppercase tracking-wide">Frigate review report</div>
+              <p class="text-[10px] text-[#6b7280] mb-1">Native GenAI report from Frigate (<span class="font-mono">POST /api/review/summarize</span>) — suspicious review items across all cameras.</p>
+              <div id="frigate-report-text" class="genai-report-md text-sm text-[#d1d5db] leading-snug whitespace-pre-wrap"></div>
+            </div>
+          </div>
+          <div id="summary-placeholder" class="text-[#6b7280] text-xs mt-1 flex-shrink-0">
+            Choose a time range, then Generate Summary and/or Frigate Report. See the GenAI Log tab for raw messages.
           </div>
         </div>
 
@@ -248,6 +260,19 @@
         <div id="pane-health" class="hidden flex-1 flex flex-col overflow-hidden">
           <div id="health-pressure" class="metric-value text-base mb-1 flex-shrink-0"></div>
           <div id="health-skipped" class="text-xs text-[#6b7280] mb-2 flex-shrink-0"></div>
+
+          <div class="flex-shrink-0 mb-2 rounded border border-[#4a5263] bg-[#161b26] px-2 py-1.5 text-xs">
+            <div class="flex items-center justify-between gap-2 mb-1">
+              <span class="font-semibold text-[#a5b4fc]">GenAI service</span>
+              <button type="button" onclick="refreshGenaiHealth(true)"
+                class="px-2 py-0.5 rounded border border-[#4a5263] text-[#9ca3af] hover:text-white text-[10px]">
+                Refresh
+              </button>
+            </div>
+            <div id="genai-health-panel" class="text-[#c0c5d1] leading-snug font-mono">
+              <span class="text-[#6b7280]">Checking GenAI health…</span>
+            </div>
+          </div>
 
           <!-- Global section - time series gets more space -->
           <div class="flex-[2] flex flex-col min-h-0">
@@ -364,6 +389,7 @@
       }
 
       if (name === 'health') {
+        refreshGenaiHealth(false);
         if (!globalPressureChart && (healthHistory.length > 0 || camerasHistory.length > 0)) {
           initHealthCharts(healthHistory, camerasHistory);
         } else if (globalPressureChart) {
@@ -548,6 +574,84 @@
                     `Backlog: ${h.detection_pressure} (${(h.pressure_pct*100).toFixed(0)}%)`;
       s.innerHTML = `Skipped frames / sec: <span class="${color}">${h.skipped_fps}</span><br>` +
                     `Pipeline healthy: <span class="${h.is_healthy ? 'good' : 'bad'}">${h.is_healthy}</span>`;
+    }
+
+    function renderGenaiHealth(gh) {
+      const el = document.getElementById('genai-health-panel');
+      if (!el) return;
+      if (!gh) {
+        el.innerHTML = '<span class="text-[#6b7280]">No GenAI health data yet.</span>';
+        return;
+      }
+      const sc = gh.status_color || 'dim';
+      const status = (gh.status || 'unknown').toUpperCase();
+      const lines = [];
+      lines.push(`<div><span class="${sc} font-semibold">${status}</span> — ${escapeHtml(gh.summary || '')}</div>`);
+
+      const ing = gh.ingestion || {};
+      lines.push(`<div class="mt-1"><span class="text-[#6b7280]">Ingestion:</span> ${escapeHtml(ing.summary || '—')}</div>`);
+
+      const act = gh.activity || {};
+      const kindParts = [];
+      const byKind = act.by_kind_1h || {};
+      for (const k of Object.keys(byKind).sort()) {
+        kindParts.push(`${k}=${byKind[k]}`);
+      }
+      const kindStr = kindParts.length ? ` (${kindParts.join(', ')})` : '';
+      const ageStr = act.last_message_age_min != null
+        ? ` · last ${act.last_message_age_min}m ago`
+        : '';
+      lines.push(
+        `<div><span class="text-[#6b7280]">Messages (1h):</span> ${act.messages_1h ?? 0}${kindStr}${ageStr}</div>`
+      );
+
+      const llm = gh.llm;
+      const probe = gh.llm_probe;
+      if (!llm) {
+        lines.push('<div><span class="text-[#6b7280]">Summary LLM:</span> <span class="warn">not configured</span></div>');
+      } else {
+        let llmLine = `${escapeHtml(llm.model)} @ ${escapeHtml(llm.base_url)}`;
+        if (probe) {
+          const ok = probe.reachable && probe.model_listed;
+          const cls = ok ? 'good' : (probe.reachable ? 'warn' : 'bad');
+          const lat = probe.latency_ms != null ? ` ${probe.latency_ms}ms` : '';
+          const detail = probe.error ? ` — ${escapeHtml(probe.error)}` : '';
+          llmLine += ` <span class="${cls}">(${probe.reachable ? 'up' : 'down'}${lat}${detail})</span>`;
+        }
+        lines.push(`<div><span class="text-[#6b7280]">Summary LLM:</span> ${llmLine}</div>`);
+      }
+
+      const fg = gh.frigate_genai;
+      if (fg && fg.configured) {
+        const en = fg.enabled ? 'enabled' : 'disabled';
+        const prov = fg.provider ? ` · ${escapeHtml(fg.provider)}` : '';
+        const mdl = fg.model ? ` · ${escapeHtml(fg.model)}` : '';
+        lines.push(`<div><span class="text-[#6b7280]">Frigate GenAI:</span> ${en}${prov}${mdl}</div>`);
+      } else if (fg) {
+        lines.push('<div><span class="text-[#6b7280]">Frigate GenAI:</span> not in Frigate config</div>');
+      }
+
+      if (gh.checked_at) {
+        const when = new Date(gh.checked_at * 1000).toLocaleTimeString();
+        lines.push(`<div class="text-[#6b7280] mt-0.5">Checked ${when}</div>`);
+      }
+      el.innerHTML = lines.join('');
+    }
+
+    async function refreshGenaiHealth(force) {
+      const el = document.getElementById('genai-health-panel');
+      if (el && force) el.innerHTML = '<span class="text-[#6b7280]">Refreshing…</span>';
+      try {
+        const q = force ? '?refresh=true' : '';
+        const r = await fetch('/api/genai/health' + q);
+        const data = await r.json();
+        if (data.ok && data.health) {
+          renderGenaiHealth(data.health);
+          if (window.__lastSnap) window.__lastSnap.genai_health = data.health;
+        }
+      } catch (e) {
+        if (el) el.innerHTML = '<span class="bad">GenAI health check failed</span>';
+      }
     }
 
     // --- Health histograms / time series using Chart.js ---
@@ -905,7 +1009,7 @@
       enabled: false,
       configEnabled: true,
       maxQueue: 24,
-      soundMap: { default: 'event.mp3', event: 'event.mp3' },
+      soundMap: { default: '', event: 'Alert.mp3', dog: 'DogDetected.mp3' },
       availableFiles: [],
       ctx: null,
 
@@ -938,10 +1042,29 @@
         }
       },
 
+      isDogLabel(label) {
+        if (!label) return false;
+        const t = String(label).trim();
+        if (!t) return false;
+        if (/^dogs?$/i.test(t)) return true;
+        return /\bdogs?\b/i.test(t);
+      },
+
+      soundKeyForItem(item) {
+        const explicit = item && item.sound;
+        if (explicit && explicit !== 'event') return explicit;
+        if (this.isDogLabel(item && item.label)) return 'dog';
+        return 'event';
+      },
+
       filenameForKind(kind) {
         const key = (kind || 'event').toString();
-        const mapped = this.soundMap[key] || this.soundMap.default || 'event.mp3';
-        return mapped;
+        if (Object.prototype.hasOwnProperty.call(this.soundMap, key)) {
+          const mapped = this.soundMap[key];
+          return mapped == null ? '' : String(mapped).trim();
+        }
+        const fallback = this.soundMap.default;
+        return fallback == null ? '' : String(fallback).trim();
       },
 
       urlForKind(kind) {
@@ -1026,7 +1149,8 @@
         if (!this.configEnabled || !this.enabled || !this.unlocked || !alerts || !alerts.length) return;
         for (let i = 0; i < alerts.length; i++) {
           if (this.queue.length >= this.maxQueue) break;
-          this.queue.push(alerts[i] || { sound: 'event' });
+          const raw = alerts[i] || { sound: 'event' };
+          this.queue.push({ ...raw, sound: this.soundKeyForItem(raw) });
         }
         this.refreshOverviewAlerts();
         this.drain();
@@ -1057,8 +1181,12 @@
       },
 
       async playAlert(item) {
-        const kind = (item && item.sound) ? item.sound : 'event';
+        const kind = this.soundKeyForItem(item || {});
         const file = this.filenameForKind(kind);
+        if (!file) {
+          await this.playChime();
+          return;
+        }
         const hasFile = !this.availableFiles.length || this.availableFiles.includes(file);
         const url = this.urlForKind(kind);
         if (url && hasFile) {
@@ -1143,6 +1271,7 @@
 
       // Health
       renderHealth(snap.health);
+      renderGenaiHealth(snap.genai_health);
 
       // Seed history from snapshot for later lazy chart init + sparklines
       if (snap.health_history && snap.health_history.length > 0) {
@@ -1252,6 +1381,10 @@
             updateCameraCharts();
           }
           break;
+        case 'genai_health':
+          window.__lastSnap = { ...(window.__lastSnap || {}), genai_health: data };
+          if (currentTab === 'health') renderGenaiHealth(data);
+          break;
         case 'health':
           window.__lastSnap = { ...(window.__lastSnap || {}), health: data };
           renderHealth(data);
@@ -1285,7 +1418,7 @@
         case 'poll_interval':
           window.__lastSnap = { ...(window.__lastSnap || {}), poll_interval: data };
           const pollInputLive = document.getElementById('poll-interval');
-          if (pollInputLive && data != null) pollInputLive.value = data;
+          if (pollInputLive && data != null) pollInputLive.value = Math.max(1, Math.round(data));
           updateOverview(window.__lastSnap);
           break;
         case 'version':
@@ -1519,20 +1652,92 @@
       return out.join('');
     }
 
+    function updateSummaryPlaceholder() {
+      const placeholder = document.getElementById('summary-placeholder');
+      const activity = document.getElementById('summary-report-panel');
+      const frigate = document.getElementById('frigate-report-panel');
+      if (!placeholder) return;
+      const anyVisible = (activity && !activity.classList.contains('hidden'))
+        || (frigate && !frigate.classList.contains('hidden'));
+      placeholder.classList.toggle('hidden', anyVisible);
+    }
+
     function renderSummaryReportMarkdown(text) {
       const panel = document.getElementById('summary-report-panel');
-      const placeholder = document.getElementById('summary-placeholder');
       const el = document.getElementById('summary-report-text');
       if (!panel || !el) return;
       if (!text) {
         panel.classList.add('hidden');
-        if (placeholder) placeholder.classList.remove('hidden');
         el.innerHTML = '';
-        return;
+      } else {
+        panel.classList.remove('hidden');
+        el.innerHTML = formatGenaiMarkdown(text);
       }
-      panel.classList.remove('hidden');
-      if (placeholder) placeholder.classList.add('hidden');
-      el.innerHTML = formatGenaiMarkdown(text);
+      updateSummaryPlaceholder();
+    }
+
+    function renderFrigateReportText(text) {
+      const panel = document.getElementById('frigate-report-panel');
+      const el = document.getElementById('frigate-report-text');
+      if (!panel || !el) return;
+      if (!text) {
+        panel.classList.add('hidden');
+        el.textContent = '';
+      } else {
+        panel.classList.remove('hidden');
+        if (/^##\s/m.test(text)) {
+          el.className = 'genai-report-md';
+          el.innerHTML = formatGenaiMarkdown(text);
+        } else {
+          el.className = 'genai-report-md text-sm text-[#d1d5db] leading-snug whitespace-pre-wrap';
+          el.textContent = text;
+        }
+      }
+      updateSummaryPlaceholder();
+    }
+
+    async function generateFrigateReport() {
+      const status = document.getElementById('frigate-report-status');
+      const btn = document.getElementById('frigate-report-btn');
+      const hrs = summaryHoursValue();
+      if (status) status.textContent = 'Requesting Frigate GenAI report…';
+      if (btn) btn.disabled = true;
+      try {
+        const r = await fetch('/api/genai/frigate-report', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hours: hrs }),
+        });
+        let data = {};
+        const raw = await r.text();
+        try {
+          data = raw ? JSON.parse(raw) : {};
+        } catch (parseErr) {
+          const snippet = raw ? raw.slice(0, 200) : '(empty body)';
+          throw new Error(`Invalid response (HTTP ${r.status}): ${snippet}`);
+        }
+        if (!r.ok && !data.error) {
+          data.error = `HTTP ${r.status} ${r.statusText || ''}`.trim();
+        }
+        if (data.ok && data.summary) {
+          renderFrigateReportText(data.summary);
+          if (status) status.textContent = `Frigate report ready (${hrs}h)`;
+        } else {
+          renderFrigateReportText('');
+          const err = data.error || 'Frigate report failed';
+          if (status) status.textContent = err;
+          if (!data.logged) {
+            await postActivityLog(`Frigate report failed (${hrs}h): ${err}`, 'error');
+          }
+        }
+      } catch (e) {
+        renderFrigateReportText('');
+        const err = (e && e.message) ? e.message : String(e);
+        if (status) status.textContent = err;
+        await postActivityLog(`Frigate report failed (${hrs}h): ${err}`, 'error');
+      } finally {
+        if (btn) btn.disabled = false;
+      }
     }
 
     async function loadGenaiLog() {
@@ -1637,24 +1842,30 @@
       EventAlertAudio.configure(snap.web_alerts || {});
       applySnapshot(snap);
 
-      // Live poll interval control (runtime change to core polling speed)
+      // Live poll interval control (runtime change to core polling speed; 1s steps)
       const pollInput = document.getElementById('poll-interval');
       if (pollInput) {
-        if (snap.poll_interval != null) pollInput.value = snap.poll_interval;
+        const syncPollInput = (seconds) => {
+          pollInput.value = Math.max(1, Math.round(seconds));
+        };
+        if (snap.poll_interval != null) syncPollInput(snap.poll_interval);
         let debounceTimer;
-        pollInput.onchange = () => {
+        const submitPollInterval = () => {
           clearTimeout(debounceTimer);
           debounceTimer = setTimeout(() => {
-            const v = parseFloat(pollInput.value) || 1.0;
+            const v = Math.max(1, Math.round(parseFloat(pollInput.value) || 5));
+            syncPollInput(v);
             fetch('/api/set_poll_interval', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ interval: v })
             }).then(r => r.json()).then(d => {
-              if (d && d.poll_interval != null) pollInput.value = d.poll_interval;
+              if (d && d.poll_interval != null) syncPollInput(d.poll_interval);
             }).catch(() => {});
           }, 250);
         };
+        pollInput.addEventListener('input', submitPollInterval);
+        pollInput.addEventListener('change', submitPollInterval);
       }
 
       // Start on overview
