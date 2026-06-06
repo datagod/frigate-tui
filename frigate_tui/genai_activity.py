@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
+from frigate_tui.local_time import format_iso, from_epoch
 
-def hour_bucket(ts: float) -> tuple[str, str]:
-    """Return (sortable hour key, display label) in local timezone."""
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
+
+def hour_bucket(ts: float, tz_name: str) -> tuple[str, str]:
+    """Return (sortable hour key, display label) in the display timezone."""
+    dt = from_epoch(ts, tz_name)
     key = dt.strftime("%Y-%m-%d %H:00")
     label = dt.strftime("%H:00")
     return key, label
@@ -26,15 +27,16 @@ def make_activity_record(
     threat: int | float | None = None,
     ref_id: str = "",
     ts: float | None = None,
+    tz_name: str = "America/New_York",
 ) -> dict[str, Any]:
     import time
 
     t = float(ts if ts is not None else time.time())
-    hk, hl = hour_bucket(t)
-    dt = datetime.fromtimestamp(t, tz=timezone.utc).astimezone()
+    hk, hl = hour_bucket(t, tz_name)
+    dt = from_epoch(t, tz_name)
     return {
         "ts": t,
-        "iso": dt.isoformat(timespec="seconds"),
+        "iso": format_iso(t, tz_name),
         "time": dt.strftime("%H:%M:%S"),
         "hour": hk,
         "hour_label": hl,

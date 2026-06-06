@@ -19,7 +19,11 @@ Watch camera FPS, detector queues / pressure, GPU usage, incoming events, and sy
 - Live events feed with object-type color coding (person, car, dog, cat…)
 - GPU, storage, uptime, and detector metrics
 - **Web dashboard** (optional): full feature parity in the browser, LAN-accessible, with proxied snapshots/clips and live SSE updates
-- **GenAI / LLM integration** (Frigate 0.17+): object descriptions and review summaries in the Activity Log; web **Summary** tab (hourly LLM narrative); **GenAI Log** tab (raw messages); Events table **AI Description** column with full text in the event modal
+- **GenAI / LLM integration** (Frigate 0.17+): object descriptions and review summaries in the Activity Log; web **Summary** tab (hourly LLM narrative + Frigate native review report); **GenAI Log** tab (raw messages); Events table **AI Description** column with full text in the event modal
+- **Local timezone display** — all timestamps shown in your configured zone (default `America/New_York` / EDT)
+- **GenAI health probes** on the web **Health / Queues** tab (LLM reachability, model listing, Frigate GenAI config)
+- **Chatterbox TTS** (web): cloned-voice speech for manual tests and optional **event alerts**; recordings cached under `localrecordings/`
+- **Event alert sounds** (web): per-label MP3 chimes with browser queue, or Chatterbox TTS when enabled
 - Keyboard-first navigation (TUI), clean error states, auto-retry
 - Works great over SSH and inside tmux (TUI); or over the local network in any browser (Web)
 
@@ -72,7 +76,8 @@ cp config.example.yaml config.yaml
 
 ```yaml
 frigate_url: "http://localhost:5000"   # or http://192.168.1.50:5000
-poll_interval: 1.0
+timezone: America/New_York             # display timestamps in this zone
+poll_interval: 5.0                     # stats refresh (web control uses 1s steps)
 ```
 
 **Recommended** — MQTT for real-time events and GenAI object descriptions in the Activity Log:
@@ -232,17 +237,52 @@ Accessible on your network at:
   http://192.168.1.42:8080
 ```
 
-The UI has six tabs: **Overview**, **Cameras** (FPS bars), **Events**, **Health / Queues**, **Summary** (LLM activity report), and **GenAI Log** (chronological GenAI messages). It also has the persistent Activity Log, top metrics strip, and connection status. Live updates arrive via SSE. Camera cards, color coding, health pressure, and every log message you see in the TUI appear here too.
+The UI has six tabs: **Overview**, **Cameras** (FPS bars), **Events**, **Health / Queues**, **Summary** (dual LLM reports), and **GenAI Log** (chronological GenAI messages). It also has the persistent Activity Log, top metrics strip, and connection status. Live updates arrive via SSE. Camera cards, color coding, health pressure, and every log message you see in the TUI appear here too.
 
-On first load, the web UI automatically requests a **Summary** report in the background (using `genai_report.default_hours`, typically 6h) so the Summary tab is often ready when you open it.
+All dates and times in the web UI use the configured **`timezone`** (default Eastern). The Health tab includes a **GenAI health** panel that probes your LLM endpoint and Frigate GenAI settings on a configurable interval.
 
-Keyboard shortcuts that make sense in a browser (`r`, `c`, `1`–`6`, `?`) are supported. Click an event row for a snapshot preview, clip link, full GenAI object description, and linked review summary when available.
+On first load, the web UI automatically requests both Summary reports in the background (using `genai_report.default_hours`, typically 6h) so the Summary tab is often ready when you open it.
 
-### Event alert chimes (web only)
+Click an event row for a snapshot preview, clip link, full GenAI object description, and linked review summary when available.
 
-When new detections arrive, the dashboard can play a short chime (queued in order, one at a time). Click **Alerts: Off** in the header once to allow browser audio, then toggle **On** / **Muted**. Configure in `config.yaml`:
+### Summary tab — dual reports (resizable)
 
-Place audio files in the project **`sounds/`** directory (mounted into the web container at `/app/sounds`). Map alert kinds to filenames:
+The **Summary** tab shows two stacked report panels:
+
+1. **Activity summary** — hourly markdown briefing from stored GenAI messages via your Ollama / OpenAI-compatible LLM (`genai_report` settings).
+2. **Frigate review report** — native GenAI output from Frigate (`POST /api/review/summarize`) across suspicious review items.
+
+Drag the horizontal divider between panels or resize from the bottom edge; the split ratio is saved in browser `localStorage`. Use **Generate** on each panel to refresh manually.
+
+Frigate reports auto-refresh on an interval (`frigate_report.auto_interval`, default 600s) and are saved to disk as `Frigate_GenAI_Report_YYYYMMDD_HHMMSS.txt` under `./reports/` (mounted into the web container).
+
+### Chatterbox TTS (web only)
+
+When `chatterbox_tts.enabled` is true, the **Overview** tab shows a voice test panel: pick a **clone** or **predefined** voice from your [Chatterbox TTS Server](https://github.com/resemble-ai/chatterbox), type text, and click **Speak**. The server proxies `POST /tts` to Chatterbox (default `http://host.docker.internal:8004` from Docker).
+
+Generated audio is cached in **`localrecordings/`** keyed by message text and voice, so repeat phrases replay instantly without calling Chatterbox again. Configure in `config.yaml`:
+
+```yaml
+chatterbox_tts:
+  enabled: true
+  base_url: http://host.docker.internal:8004
+  voice_mode: clone
+  reference_audio_filename: JLC_William_McEvoy.mp3   # clone voice for event alerts
+  cache_dir: localrecordings
+  event_alerts: true                                 # speak on new detections when Alerts are On
+  event_template: "{label} on {camera}"              # e.g. "person on driveway"
+  default_test_message: "Person detected on driveway."
+```
+
+API: `GET /api/tts/voices`, `POST /api/tts/speak` (optional `voice_mode` / `voice` for manual tests). Event alerts always use the configured clone/predefined voice, not the Overview dropdown.
+
+### Event alerts — sounds and TTS (web only)
+
+When new detections arrive with **Alerts: On**, the dashboard queues playback (one at a time). Click **Alerts: Off** once to allow browser audio, then toggle **On** / **Muted**.
+
+**Chatterbox TTS** (when `chatterbox_tts.event_alerts` is true): speaks the `event_template` for each new event. Cached recordings are reused when the same phrase was generated before.
+
+**MP3 chimes** (fallback or when TTS is off): place audio in **`sounds/`** (mounted at `/app/sounds`) and map kinds in config:
 
 ```yaml
 web_alerts:
@@ -255,9 +295,7 @@ web_alerts:
     # review: review.mp3
 ```
 
-New events play **Alert.mp3**; labels matching dog (e.g. `dog`, `Dog`, `person (dog)`) play **DogDetected.mp3**. Unmapped kinds and missing files fall back to a built-in chime.
-
-Files are served at `/sounds/<filename>`. List available files: `GET /api/sounds`.
+New events play **Alert.mp3**; labels matching dog play **DogDetected.mp3**. Unmapped kinds and missing files fall back to a built-in chime. Files are served at `/sounds/<filename>`; list via `GET /api/sounds`.
 
 ### Why a web UI?
 
@@ -333,10 +371,18 @@ Settings are covered in [Installation → Configure](#2-configure). Priority (hi
 See `config.example.yaml` for the full schema.
 
 Notable config options include:
+- `timezone`: IANA zone for all displayed timestamps (default `America/New_York`). Override with `FRIGATE_TUI_TZ` or `TZ`.
+- `poll_interval`: seconds between `/api/stats` refreshes (default 5.0; web UI slider uses 1s steps).
 - `stats_log_interval`: seconds between "Stats OK" messages in the Activity Log (default: 600 / 10 minutes). Errors are always logged immediately.
-- `genai_report`: LLM endpoint, model, timeout, and `default_hours` for the web Summary / GenAI Log tabs.
+- `genai_report`: LLM endpoint, model, timeout, `default_hours`, and `health_probe_timeout` for Summary / GenAI Log / Health probes.
+- `genai_health_interval`: seconds between automatic GenAI health checks on the web Health tab.
+- `frigate_report`: `auto_interval` (browser auto-refresh for Frigate native report) and `save_dir` (`reports/` by default).
+- `chatterbox_tts`: Chatterbox server URL, clone voice, `localrecordings` cache, and `event_alerts` / `event_template`.
+- `web_alerts`: MP3 chime mappings for browser event alerts.
 - `genai_activity_hours_keep` / `genai_activity_max`: how long and how many GenAI messages to retain in memory for reports.
 - `events_poll_interval` / `events_reconcile_interval`: keep the Events tab aligned with the Activity Log when not using MQTT for every update.
+
+Docker volumes for the web service: `./sounds`, `./reports`, and `./localrecordings` (see `docker-compose.yml`).
 
 ### Real-time Events via MQTT (Recommended)
 
@@ -356,11 +402,13 @@ When enabled, the Activity Log will say **"MQTT connected — receiving events i
 
 ## Key Bindings
 
+**TUI only** — the web dashboard does not use global keyboard shortcuts (avoids conflicts with typing in inputs).
+
 | Key     | Action                  |
 |---------|-------------------------|
 | `q`     | Quit                    |
 | `r`     | Force refresh           |
-| `1-6`   | Switch tabs (web: includes Summary & GenAI Log) |
+| `1-6`   | Switch tabs             |
 | `Tab`   | Cycle focus             |
 | `?`     | Help / key legend       |
 | `F2`    | Textual dev console (dev mode) |
@@ -385,7 +433,7 @@ docker compose --profile web up --build frigate-web
 
 - Snapshot thumbnail previews in event detail (Pillow + sixel/kitty protocol)
 - Dedicated Reviews tab in the TUI (review summaries already appear in the Activity Log and web GenAI views)
-- Persist GenAI activity history across restarts (currently in-memory for the session)
+- Persist GenAI activity history across restarts (Frigate native reports are already saved under `reports/`)
 
 ## License
 

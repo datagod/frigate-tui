@@ -19,10 +19,21 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Awaitable
 
 from frigate_tui import __version__
+from frigate_tui.chatterbox_tts import chatterbox_settings_from_config
+from frigate_tui.tts_recording_cache import format_event_tts_message
+from frigate_tui.local_time import (
+    configured_timezone_name,
+    format_iso,
+    format_time,
+    localize_frigate_report_times,
+    now_local,
+    tz_label_now,
+)
 from frigate_tui.api import FrigateClient
 from frigate_tui.genai_activity import group_by_hour, list_chronological, make_activity_record
 from frigate_tui.genai_health import collect_genai_health
 from frigate_tui.genai_report import generate_activity_report, resolve_llm_settings
+from frigate_tui.report_storage import save_frigate_genai_report
 from frigate_tui.models import (
     CameraStats,
     FrigateEvent,
@@ -86,6 +97,13 @@ class FrigateMonitorCore:
         self.genai_report_default_hours: float = float(
             self.genai_report_config.get("default_hours", 6.0)
         )
+        frigate_report = dict(s.get("frigate_report") or {})
+        self.frigate_report_auto_interval: float = max(
+            0.0, float(frigate_report.get("auto_interval", 600))
+        )
+        self.frigate_report_save_dir: str = (
+            str(frigate_report.get("save_dir", "reports")).strip() or "reports"
+        )
         web_alerts = dict(s.get("web_alerts") or {})
         self.web_alerts_enabled: bool = bool(web_alerts.get("enabled", True))
         self.web_alerts_max_queue: int = max(1, int(web_alerts.get("max_queue", 24)))
@@ -99,11 +117,15 @@ class FrigateMonitorCore:
             self.web_alerts_sounds.setdefault("default", "")
         self.web_alerts_sounds.setdefault("event", DEFAULT_EVENT_SOUND)
         self.web_alerts_sounds.setdefault("dog", DEFAULT_DOG_SOUND)
+        self.chatterbox_tts_config: dict[str, Any] = chatterbox_settings_from_config(
+            s.get("chatterbox_tts")
+        )
         self._genai_activity_hours_keep: float = float(
             s.get("genai_activity_hours_keep", 48.0)
         )
         self._max_genai_activity: int = int(s.get("genai_activity_max", 1500))
         self.tui_version = __version__
+        self.display_timezone: str = configured_timezone_name(str(s.get("timezone") or ""))
         self.demo: bool = bool(s.get("demo", False))
 
         # MQTT (optional)
@@ -301,6 +323,27 @@ class FrigateMonitorCore:
                 "sounds": dict(self.web_alerts_sounds),
             },
             "genai_health": self.genai_health,
+            "frigate_report": {
+                "auto_interval": self.frigate_report_auto_interval,
+                "save_dir": self.frigate_report_save_dir,
+            },
+            "display_timezone": self.display_timezone,
+            "display_timezone_label": tz_label_now(self.display_timezone),
+            "chatterbox_tts": {
+                "enabled": self.chatterbox_tts_config.get("enabled", False),
+                "voice_mode": self.chatterbox_tts_config.get("voice_mode", "clone"),
+                "reference_audio_filename": self.chatterbox_tts_config.get(
+                    "reference_audio_filename", ""
+                ),
+                "predefined_voice_id": self.chatterbox_tts_config.get("predefined_voice_id", ""),
+                "default_test_message": self.chatterbox_tts_config.get(
+                    "default_test_message", ""
+                ),
+                "event_alerts": self.chatterbox_tts_config.get("event_alerts", False),
+                "event_template": self.chatterbox_tts_config.get(
+                    "event_template", "{label} on {camera}"
+                ),
+            },
         }
 
     # ------------------------------------------------------------------
@@ -475,7 +518,9 @@ class FrigateMonitorCore:
     # ------------------------------------------------------------------
 
     def add_log(self, message: str, level: str = "info") -> None:
-        ts = datetime.now().astimezone().strftime("%H:%M:%S")
+        dt = now_local(self.display_timezone)
+        label = dt.strftime("%Z")
+        ts = f"{dt.strftime('%H:%M:%S')} {label}" if label else dt.strftime("%H:%M:%S")
         entry = {"ts": ts, "level": level, "message": message}
         self.log_entries.append(entry)
         if len(self.log_entries) > self._max_log_entries:
@@ -566,6 +611,7 @@ class FrigateMonitorCore:
             threat=threat,
             ref_id=ref_id,
             ts=ts,
+            tz_name=self.display_timezone,
         )
         self._genai_activity_keys.add(key)
         self.genai_activity.append(record)
@@ -612,7 +658,7 @@ class FrigateMonitorCore:
                 "hours": hrs,
                 "sections": sections,
                 "report": report.strip(),
-                "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "generated_at": format_iso(time.time(), self.display_timezone),
             }
         if not sections:
             msg = f"Summary failed: no GenAI messages in the last {hrs:g} hour(s)"
@@ -685,18 +731,54 @@ class FrigateMonitorCore:
             "sections": sections,
             "report": report,
             "llm": llm,
-            "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "generated_at": format_iso(time.time(), self.display_timezone),
         }
+
+    def _persist_frigate_review_report(
+        self,
+        summary: str,
+        *,
+        hours: float,
+        start_ts: float,
+        end_ts: float,
+        generated_at: datetime | None = None,
+    ) -> str | None:
+        when = generated_at or now_local(self.display_timezone)
+        try:
+            path = save_frigate_genai_report(
+                summary,
+                save_dir=self.frigate_report_save_dir,
+                hours=hours,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                generated_at=when,
+                tz_name=self.display_timezone,
+            )
+        except OSError as e:
+            self.add_log(f"Frigate report save failed: {type(e).__name__}: {e}", "warning")
+            return None
+        if path:
+            self.add_log(f"Frigate report saved: {path}", "info")
+        return path
 
     async def generate_frigate_review_report(self, hours: float | None = None) -> dict[str, Any]:
         """Request Frigate's native GenAI review summarize report for a time window."""
         hrs = hours if hours is not None else self.genai_report_default_hours
         end_ts = time.time()
         start_ts = end_ts - hrs * 3600.0
+        generated_at = now_local(self.display_timezone)
+        generated_iso = format_iso(end_ts, self.display_timezone)
         if self.demo:
             summary = (
                 "Demo mode: no suspicious review activity was flagged in this window. "
                 "Frigate's native report summarizes alert-level review GenAI summaries."
+            )
+            saved_path = self._persist_frigate_review_report(
+                summary,
+                hours=hrs,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                generated_at=generated_at,
             )
             return {
                 "ok": True,
@@ -705,7 +787,8 @@ class FrigateMonitorCore:
                 "start_ts": start_ts,
                 "end_ts": end_ts,
                 "summary": summary,
-                "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "generated_at": generated_iso,
+                "saved_path": saved_path,
             }
         if not self._client:
             return {
@@ -751,6 +834,19 @@ class FrigateMonitorCore:
                 "logged": True,
             }
         summary = str(result.get("summary") or "").strip()
+        if summary:
+            summary = localize_frigate_report_times(
+                summary,
+                window_start_ts=start_ts,
+                tz_name=self.display_timezone,
+            )
+        saved_path = self._persist_frigate_review_report(
+            summary,
+            hours=hrs,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            generated_at=generated_at,
+        )
         self.add_log(f"Frigate report ready ({hrs:g}h)", "success")
         return {
             "ok": True,
@@ -758,7 +854,8 @@ class FrigateMonitorCore:
             "start_ts": start_ts,
             "end_ts": end_ts,
             "summary": summary,
-            "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "generated_at": generated_iso,
+            "saved_path": saved_path,
         }
 
     async def _backfill_genai_activity(self) -> None:
@@ -1071,18 +1168,25 @@ class FrigateMonitorCore:
         self.recent_events = merged
         self._notify("events", self.recent_events)
         if new_only and self.web_alerts_enabled:
-            self._notify(
-                "event_alerts",
-                [
-                    {
-                        "id": e.id,
-                        "camera": e.camera,
-                        "label": e.display_label or e.label,
-                        "sound": event_alert_sound_key(e.label, e.sub_label),
-                    }
-                    for e in new_only
-                ],
-            )
+            tts_cfg = self.chatterbox_tts_config
+            use_event_tts = bool(tts_cfg.get("enabled") and tts_cfg.get("event_alerts"))
+            tts_template = str(tts_cfg.get("event_template") or "{label} on {camera}")
+            alert_items = []
+            for e in new_only:
+                item: dict[str, Any] = {
+                    "id": e.id,
+                    "camera": e.camera,
+                    "label": e.display_label or e.label,
+                    "sound": event_alert_sound_key(e.label, e.sub_label),
+                }
+                if use_event_tts:
+                    item["tts_text"] = format_event_tts_message(
+                        item["label"],
+                        e.camera,
+                        template=tts_template,
+                    )
+                alert_items.append(item)
+            self._notify("event_alerts", alert_items)
 
         if log_new and new_only:
             for ev in new_only[:3]:
@@ -1114,7 +1218,7 @@ class FrigateMonitorCore:
                 if added:
                     newest = max(e.start_time for e in added)
                     self.add_log(
-                        f"Events table updated from API (+{len(added)}; newest {datetime.fromtimestamp(newest, tz=timezone.utc).astimezone().strftime('%H:%M:%S')})",
+                        f"Events table updated from API (+{len(added)}; newest {format_time(newest, self.display_timezone)})",
                         "info",
                     )
         except Exception as e:

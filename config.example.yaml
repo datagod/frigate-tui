@@ -2,6 +2,7 @@
 # Copy to config.yaml (next to this file) or place at ~/.config/frigate-tui/config.yaml
 
 frigate_url: "http://localhost:5000"   # or http://your-frigate-host:5000
+timezone: America/New_York             # display all timestamps in this zone (EDT/EST)
 poll_interval: 5.0                     # seconds between /api/stats refreshes (web UI control uses 1s steps)
 review_interval: 8.0                   # seconds between review polls (for activity log)
 timeline_interval: 5.0                 # seconds between timeline polls (for activity log)
@@ -41,6 +42,25 @@ genai_report:
   health_probe_timeout: 8          # LLM reachability check on Health tab (seconds)
 
 genai_health_interval: 30          # seconds between automatic GenAI health probes
+
+# Web Summary tab: Frigate native review summarize report (POST /api/review/summarize)
+frigate_report:
+  auto_interval: 600               # seconds between auto-refresh in browser (0 = disabled)
+  save_dir: reports              # Frigate_GenAI_Report_YYYYMMDD_HHMMSS.txt files
+
+# Chatterbox TTS Server — manual voice test on Overview tab (clone voice from reference_audio/)
+chatterbox_tts:
+  enabled: true
+  base_url: http://host.docker.internal:8004   # or http://chatterbox-tts-server:8004 on shared Docker network
+  voice_mode: clone
+  reference_audio_filename: JLC_William_McEvoy.mp3
+  output_format: wav
+  split_text: false
+  timeout: 60
+  cache_dir: localrecordings   # cached WAV/MP3 keyed by message text; replayed without calling Chatterbox
+  event_alerts: true           # new detections: speak "{label} on {camera}" via Chatterbox
+  event_template: "{label} on {camera}"
+  default_test_message: "Person detected on driveway."
 
 # Web UI alert sounds (browser only; queued playback). Place MP3/WAV files in ./sounds/
 web_alerts:

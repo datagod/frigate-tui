@@ -5,3 +5,11 @@ sounds/*.ogg
 sounds/*.m4a
 sounds/*.aac
 sounds/*.webm
+
+# Saved Frigate GenAI reports (keep reports/.gitkeep in git)
+reports/*
+!reports/.gitkeep
+
+# Cached Chatterbox TTS recordings (keep localrecordings/.gitkeep in git)
+localrecordings/*
+!localrecordings/.gitkeep

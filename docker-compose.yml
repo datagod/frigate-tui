@@ -81,6 +81,8 @@ services:
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./sounds:/app/sounds:ro
+      - ./reports:/app/reports
+      - ./localrecordings:/app/localrecordings
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
 

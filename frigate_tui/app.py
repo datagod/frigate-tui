@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+import time
+
+from frigate_tui.local_time import format_time
 from typing import Any
 
 from rich.text import Text
@@ -266,11 +268,12 @@ class FrigateMonitor(App[None]):
         # We still let the old methods read/write these reactives for minimal diff in renders.
         # The listeners below will keep them in sync with core.
 
-    def add_log(self, message: str, level: str = "info") -> None:
+    def add_log(self, message: str, level: str = "info", *, ts: str | None = None) -> None:
         """Append a timestamped message to the right-hand activity log."""
         try:
             log = self.query_one("#activity-log", RichLog)
-            ts = datetime.now().astimezone().strftime("%H:%M:%S")
+            if not ts:
+                ts = format_time(time.time(), self.core.display_timezone, with_tz=True)
 
             if level == "error":
                 style = "bold red"
@@ -443,7 +446,11 @@ class FrigateMonitor(App[None]):
             elif kind == "log":
                 # Core already emitted the exact same message strings as the old TUI
                 if isinstance(payload, dict):
-                    self.add_log(payload.get("message", ""), payload.get("level", "info"))
+                    self.add_log(
+                        payload.get("message", ""),
+                        payload.get("level", "info"),
+                        ts=payload.get("ts"),
+                    )
                 else:
                     self.add_log(str(payload))
             elif kind == "connection":
@@ -593,7 +600,7 @@ class FrigateMonitor(App[None]):
                 # inserts; rebuild uses the list which is kept sorted + capped).
                 table.clear()
                 for ev in self.recent_events:
-                    ts = datetime.fromtimestamp(ev.start_time, tz=timezone.utc).astimezone().strftime("%H:%M:%S")
+                    ts = format_time(ev.start_time, self.core.display_timezone)
                     dur = f"{ev.duration_s:.1f}s" if ev.duration_s else "—"
                     clip = "📼" if ev.has_clip else ""
                     snap = "📷" if ev.has_snapshot else ""
@@ -622,7 +629,7 @@ class FrigateMonitor(App[None]):
                 # All items in to_process are updates to rows we already have: just refresh cells.
                 for ev in to_process:
                     if ev.id in table.rows:
-                        ts = datetime.fromtimestamp(ev.start_time, tz=timezone.utc).astimezone().strftime("%H:%M:%S")
+                        ts = format_time(ev.start_time, self.core.display_timezone)
                         dur = f"{ev.duration_s:.1f}s" if ev.duration_s else "—"
                         clip = "📼" if ev.has_clip else ""
                         snap = "📷" if ev.has_snapshot else ""

@@ -20,6 +20,12 @@ from fastapi.templating import Jinja2Templates
 from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from starlette.staticfiles import StaticFiles
 
+from frigate_tui.chatterbox_tts import (
+    apply_voice_override,
+    get_or_synthesize_speech,
+    list_chatterbox_voices,
+    warm_event_tts_recordings,
+)
 from frigate_tui.core import FrigateMonitorCore
 from frigate_tui.web.sounds_util import list_sound_files, sounds_directory
 
@@ -102,9 +108,11 @@ async def lifespan(app: FastAPI):
                     broadcaster.publish({"type": "genai_health", "data": payload or {}})
                 )
             elif kind == "event_alerts":
+                alerts = payload or []
                 asyncio.create_task(
-                    broadcaster.publish({"type": "event_alerts", "data": payload or []})
+                    broadcaster.publish({"type": "event_alerts", "data": alerts})
                 )
+                asyncio.create_task(warm_event_tts_recordings(core, alerts))
             elif kind == "events":
                 # Send full authoritative list (browser does the right thing for order)
                 evs = []
@@ -218,6 +226,104 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
             return JSONResponse({"ok": True, "poll_interval": core.poll_interval})
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    @app.get("/api/tts/voices")
+    async def api_tts_voices():
+        """List Chatterbox clone and predefined voices for the test UI."""
+        cfg = core.chatterbox_tts_config
+        if not cfg.get("enabled"):
+            return JSONResponse(
+                {"ok": False, "error": "Chatterbox TTS is disabled in config."},
+                status_code=503,
+            )
+        try:
+            voices = await list_chatterbox_voices(cfg)
+            default_mode = cfg.get("voice_mode", "clone")
+            default_voice = (
+                cfg.get("reference_audio_filename")
+                if default_mode == "clone"
+                else cfg.get("predefined_voice_id")
+            )
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "voices": voices,
+                    "default": {"voice_mode": default_mode, "voice": default_voice},
+                }
+            )
+        except Exception as e:
+            return JSONResponse(
+                {"ok": False, "error": f"{type(e).__name__}: {e}"},
+                status_code=502,
+            )
+
+    @app.post("/api/tts/speak")
+    async def api_tts_speak(request: Request):
+        """Proxy short text to Chatterbox TTS and return generated audio."""
+        cfg = core.chatterbox_tts_config
+        if not cfg.get("enabled"):
+            return JSONResponse(
+                {"ok": False, "error": "Chatterbox TTS is disabled in config."},
+                status_code=503,
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        text = str(body.get("text") or cfg.get("default_test_message") or "").strip()
+        if not text:
+            return JSONResponse(
+                {"ok": False, "error": "text is required"},
+                status_code=400,
+            )
+        speak_cfg = apply_voice_override(
+            cfg,
+            voice_mode=body.get("voice_mode"),
+            voice=body.get("voice"),
+        )
+        try:
+            audio, media_type, from_cache, saved_path = await get_or_synthesize_speech(
+                text, settings=speak_cfg
+            )
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except TimeoutError as e:
+            core.add_log(f"TTS failed: {e}", "error")
+            return JSONResponse({"ok": False, "error": str(e), "logged": True}, status_code=504)
+        except ConnectionError as e:
+            core.add_log(f"TTS failed: {e}", "error")
+            return JSONResponse({"ok": False, "error": str(e), "logged": True}, status_code=502)
+        except RuntimeError as e:
+            core.add_log(f"TTS failed: {e}", "error")
+            return JSONResponse({"ok": False, "error": str(e), "logged": True}, status_code=502)
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+            core.add_log(f"TTS failed: {err}", "error")
+            return JSONResponse(
+                {"ok": False, "error": err, "logged": True},
+                status_code=500,
+            )
+
+        voice = (
+            speak_cfg.get("reference_audio_filename")
+            if speak_cfg.get("voice_mode") == "clone"
+            else speak_cfg.get("predefined_voice_id")
+        )
+        if from_cache:
+            core.add_log(f"TTS cache hit ({voice or 'default'}): {saved_path}", "info")
+        else:
+            core.add_log(
+                f"TTS generated {len(text)} chars ({voice or 'default'}), saved: {saved_path}",
+                "success",
+            )
+        return Response(
+            content=audio,
+            media_type=media_type,
+            headers={
+                "Cache-Control": "no-store",
+                "X-TTS-Cache": "hit" if from_cache else "miss",
+            },
+        )
 
     @app.post("/api/log")
     async def api_log(request: Request):
