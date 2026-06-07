@@ -19,11 +19,18 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Awaitable
 
 from frigate_tui import __version__
-from frigate_tui.chatterbox_tts import apply_voice_override, chatterbox_settings_from_config
+from frigate_tui.chatterbox_tts import (
+    apply_delivery_mode_settings,
+    apply_voice_override,
+    chatterbox_settings_from_config,
+)
+from frigate_tui.delivery_modes import DELIVERY_MODES, apply_delivery_mode, normalize_delivery_mode
 from frigate_tui.tts_recording_cache import (
     format_event_tts_message,
+    load_event_tts_prefs,
     load_event_voice_pref,
     resolve_event_tts_label,
+    save_event_tts_prefs,
     save_event_voice_pref,
 )
 from frigate_tui.local_time import (
@@ -126,11 +133,14 @@ class FrigateMonitorCore:
         self.chatterbox_tts_config: dict[str, Any] = chatterbox_settings_from_config(
             s.get("chatterbox_tts")
         )
-        saved_voice = load_event_voice_pref(self.chatterbox_tts_config.get("cache_dir", "localrecordings"))
-        self._event_tts_voice_mode: str | None = (
-            saved_voice.get("voice_mode") if saved_voice else None
+        saved_prefs = load_event_tts_prefs(
+            self.chatterbox_tts_config.get("cache_dir", "localrecordings")
         )
-        self._event_tts_voice: str | None = saved_voice.get("voice") if saved_voice else None
+        self._event_tts_voice_mode: str | None = saved_prefs.get("voice_mode")
+        self._event_tts_voice: str | None = saved_prefs.get("voice")
+        self._event_tts_delivery_mode: str = normalize_delivery_mode(
+            saved_prefs.get("delivery_mode")
+        )
         self._genai_activity_hours_keep: float = float(
             s.get("genai_activity_hours_keep", 48.0)
         )
@@ -357,6 +367,8 @@ class FrigateMonitorCore:
                     "event_template", "{label} on {camera}"
                 ),
                 "chosen_voice": self.get_event_tts_voice(),
+                "delivery_mode": self.get_event_tts_delivery_mode(),
+                "delivery_modes": list(DELIVERY_MODES),
             },
         }
 
@@ -382,22 +394,42 @@ class FrigateMonitorCore:
         else:
             self._event_tts_voice_mode = None
             self._event_tts_voice = None
-        save_event_voice_pref(
+        save_event_tts_prefs(
             self.chatterbox_tts_config.get("cache_dir", "localrecordings"),
             voice_mode=self._event_tts_voice_mode,
             voice=self._event_tts_voice,
+            delivery_mode=self._event_tts_delivery_mode,
         )
         return self.get_event_tts_voice()
 
+    def get_event_tts_delivery_mode(self) -> str:
+        return normalize_delivery_mode(self._event_tts_delivery_mode)
+
+    def set_event_tts_delivery_mode(self, delivery_mode: str | None) -> str:
+        """Save the UI-chosen delivery style for alerts and Speak tests."""
+        self._event_tts_delivery_mode = normalize_delivery_mode(delivery_mode)
+        save_event_tts_prefs(
+            self.chatterbox_tts_config.get("cache_dir", "localrecordings"),
+            voice_mode=self._event_tts_voice_mode,
+            voice=self._event_tts_voice,
+            delivery_mode=self._event_tts_delivery_mode,
+        )
+        return self.get_event_tts_delivery_mode()
+
     def get_event_tts_settings(self) -> dict[str, Any]:
-        """Chatterbox settings with UI-chosen voice applied when set."""
+        """Chatterbox settings with UI-chosen voice and delivery mode applied."""
         chosen = self.get_event_tts_voice()
-        if not chosen:
-            return dict(self.chatterbox_tts_config)
-        return apply_voice_override(
-            self.chatterbox_tts_config,
-            voice_mode=chosen["voice_mode"],
-            voice=chosen["voice"],
+        if chosen:
+            settings = apply_voice_override(
+                self.chatterbox_tts_config,
+                voice_mode=chosen["voice_mode"],
+                voice=chosen["voice"],
+            )
+        else:
+            settings = dict(self.chatterbox_tts_config)
+        return apply_delivery_mode_settings(
+            settings,
+            self.get_event_tts_delivery_mode(),
         )
 
     # ------------------------------------------------------------------
@@ -711,11 +743,15 @@ class FrigateMonitorCore:
                 "sound": event_alert_sound_key(label, sub_label),
             }
             if use_tts:
-                item["tts_text"] = format_event_tts_message(
+                base_tts = format_event_tts_message(
                     label,
                     camera,
                     sub_label=sub_label,
                     template=tts_template,
+                )
+                item["tts_text"] = apply_delivery_mode(
+                    base_tts,
+                    self.get_event_tts_delivery_mode(),
                 )
             alert_items.append(item)
         if alert_items:

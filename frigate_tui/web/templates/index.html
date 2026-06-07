@@ -202,9 +202,10 @@
           <div id="chatterbox-tts-panel" class="hidden mb-4 p-3 bg-[#161b26] border border-[#4a5263] rounded text-sm">
             <div class="font-semibold text-[#c0c5d1] mb-1">Chatterbox voice</div>
             <p class="text-[10px] text-[#6b7280] mb-2">
-              Choose the voice used for event alerts and new recordings. Test with Speak below.
+              Choose the voice and delivery mode for event alerts and new recordings. Test with Speak below.
+              Conspiracy mode appends Alex Jones–style follow-ups to the alert text.
               Cloned voices are listed first. Cached under
-              <span class="font-mono">localrecordings/</span> by message + voice.
+              <span class="font-mono">localrecordings/</span> by message + voice + mode.
             </p>
             <div class="flex flex-wrap items-center gap-2 text-xs mb-2">
               <label class="text-[#6b7280] shrink-0" for="chatterbox-tts-voice-select">Voice</label>
@@ -216,6 +217,15 @@
                 class="px-2 py-1 rounded border border-[#4a5263] text-[#9ca3af] hover:text-white">
                 Refresh
               </button>
+            </div>
+            <div class="flex flex-wrap items-center gap-2 text-xs mb-2">
+              <label class="text-[#6b7280] shrink-0" for="chatterbox-tts-mode-select">Mode</label>
+              <select id="chatterbox-tts-mode-select"
+                class="min-w-[140px] bg-[#12151c] border border-[#4a5263] rounded px-2 py-1 text-[#c0c5d1]">
+                <option value="normal">Normal</option>
+                <option value="conspiracy">Conspiracy</option>
+                <option value="panicky">Panicky</option>
+              </select>
             </div>
             <div class="flex flex-wrap items-center gap-2 text-xs">
               <input id="chatterbox-tts-text" type="text"
@@ -1498,10 +1508,13 @@
     }
 
     const CHATTERBOX_VOICE_STORAGE_KEY = 'frigate-tui-tts-test-voice';
+    const CHATTERBOX_MODE_STORAGE_KEY = 'frigate-tui-tts-delivery-mode';
+    const CHATTERBOX_DELIVERY_MODES = ['normal', 'conspiracy', 'panicky'];
 
     function setupChatterboxTtsPanel(snap) {
       const panel = document.getElementById('chatterbox-tts-panel');
       const input = document.getElementById('chatterbox-tts-text');
+      const modeSel = document.getElementById('chatterbox-tts-mode-select');
       const cfg = snap && snap.chatterbox_tts;
       if (!panel) return;
       if (!cfg || !cfg.enabled) {
@@ -1511,6 +1524,15 @@
       panel.classList.remove('hidden');
       if (input && !input.value && cfg.default_test_message) {
         input.value = cfg.default_test_message;
+      }
+      if (modeSel) {
+        const preferred = cfg.delivery_mode
+          || localStorage.getItem(CHATTERBOX_MODE_STORAGE_KEY)
+          || 'normal';
+        if (CHATTERBOX_DELIVERY_MODES.includes(preferred)) {
+          modeSel.value = preferred;
+        }
+        modeSel.onchange = applyChatterboxDeliveryModeSelection;
       }
       loadChatterboxVoices(false);
     }
@@ -1535,17 +1557,35 @@
       return parseChatterboxVoiceValue(sel.value);
     }
 
-    async function syncChatterboxVoiceToServer(voice) {
-      if (!voice || !voice.voice_mode || !voice.voice) return;
+    function getSelectedChatterboxDeliveryMode() {
+      const sel = document.getElementById('chatterbox-tts-mode-select');
+      const value = sel ? String(sel.value || 'normal').trim().toLowerCase() : 'normal';
+      return CHATTERBOX_DELIVERY_MODES.includes(value) ? value : 'normal';
+    }
+
+    async function syncChatterboxPrefsToServer(prefs) {
+      const payload = Object.assign({}, prefs || {});
+      if (!payload.voice_mode && !payload.voice && !payload.delivery_mode) return;
       try {
         await fetch('/api/tts/voice', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(voice),
+          body: JSON.stringify(payload),
         });
       } catch (e) {
-        // non-fatal; browser still passes voice on speak/play
+        // non-fatal; browser still passes prefs on speak/play
       }
+    }
+
+    function applyChatterboxDeliveryModeSelection() {
+      const mode = getSelectedChatterboxDeliveryMode();
+      localStorage.setItem(CHATTERBOX_MODE_STORAGE_KEY, mode);
+      const voice = getSelectedChatterboxVoice();
+      syncChatterboxPrefsToServer({
+        voice_mode: voice && voice.voice_mode,
+        voice: voice && voice.voice,
+        delivery_mode: mode,
+      });
     }
 
     async function loadChatterboxVoices(force) {
@@ -1595,6 +1635,7 @@
         const saved = localStorage.getItem(CHATTERBOX_VOICE_STORAGE_KEY);
         const def = data.default || {};
         const chosen = data.chosen || {};
+        const modeSel = document.getElementById('chatterbox-tts-mode-select');
         const preferred = (chosen.voice_mode && chosen.voice
           ? chatterboxVoiceOptionValue(chosen.voice_mode, chosen.voice)
           : null)
@@ -1612,14 +1653,28 @@
           sel.selectedIndex = 0;
         }
 
+        if (modeSel) {
+          const preferredMode = data.delivery_mode
+            || localStorage.getItem(CHATTERBOX_MODE_STORAGE_KEY)
+            || 'normal';
+          if (CHATTERBOX_DELIVERY_MODES.includes(preferredMode)) {
+            modeSel.value = preferredMode;
+          }
+        }
+
         const applyVoiceSelection = () => {
           if (!sel.value) return;
           localStorage.setItem(CHATTERBOX_VOICE_STORAGE_KEY, sel.value);
           const voice = parseChatterboxVoiceValue(sel.value);
-          syncChatterboxVoiceToServer(voice);
+          syncChatterboxPrefsToServer({
+            voice_mode: voice.voice_mode,
+            voice: voice.voice,
+            delivery_mode: getSelectedChatterboxDeliveryMode(),
+          });
         };
         sel.onchange = applyVoiceSelection;
         applyVoiceSelection();
+        applyChatterboxDeliveryModeSelection();
 
         if (force && status) status.textContent = '';
       } catch (e) {
@@ -1638,7 +1693,10 @@
       const voice = (voiceOverride && voiceOverride.voice_mode && voiceOverride.voice)
         ? voiceOverride
         : getSelectedChatterboxVoice();
-      const payload = { text: message };
+      const payload = {
+        text: message,
+        delivery_mode: getSelectedChatterboxDeliveryMode(),
+      };
       if (voice && voice.voice_mode && voice.voice) {
         payload.voice_mode = voice.voice_mode;
         payload.voice = voice.voice;

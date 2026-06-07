@@ -21,11 +21,13 @@ from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingR
 from starlette.staticfiles import StaticFiles
 
 from frigate_tui.chatterbox_tts import (
+    apply_delivery_mode_settings,
     apply_voice_override,
     get_or_synthesize_speech,
     list_chatterbox_voices,
     warm_event_tts_recordings,
 )
+from frigate_tui.delivery_modes import apply_delivery_mode, normalize_delivery_mode
 from frigate_tui.core import FrigateMonitorCore
 from frigate_tui.tts_recording_cache import (
     delete_recordings,
@@ -333,6 +335,7 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
             {
                 "ok": True,
                 "chosen": chosen,
+                "delivery_mode": core.get_event_tts_delivery_mode(),
                 "default": {"voice_mode": default_mode, "voice": default_voice},
             }
         )
@@ -350,18 +353,33 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
             body = await request.json()
         except Exception:
             body = {}
-        chosen = core.set_event_tts_voice(
-            body.get("voice_mode"),
-            body.get("voice"),
-        )
-        if chosen:
-            core.add_log(
-                f"Event TTS voice set to {chosen['voice']} ({chosen['voice_mode']})",
-                "info",
+        if body.get("voice_mode") and body.get("voice"):
+            chosen = core.set_event_tts_voice(
+                body.get("voice_mode"),
+                body.get("voice"),
             )
         else:
+            chosen = core.get_event_tts_voice()
+        if "delivery_mode" in body:
+            delivery_mode = core.set_event_tts_delivery_mode(body.get("delivery_mode"))
+        else:
+            delivery_mode = core.get_event_tts_delivery_mode()
+        if chosen and (body.get("voice_mode") and body.get("voice")):
+            core.add_log(
+                f"Event TTS voice set to {chosen['voice']} ({chosen['voice_mode']}, {delivery_mode})",
+                "info",
+            )
+        elif "delivery_mode" in body:
+            core.add_log(f"Event TTS delivery mode set to {delivery_mode}", "info")
+        elif body.get("voice_mode") or body.get("voice"):
             core.add_log("Event TTS voice cleared (using config default)", "info")
-        return JSONResponse({"ok": True, "chosen": chosen})
+        return JSONResponse(
+            {
+                "ok": True,
+                "chosen": chosen,
+                "delivery_mode": delivery_mode,
+            }
+        )
 
     @app.get("/api/tts/voices")
     async def api_tts_voices():
@@ -386,6 +404,7 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
                     "voices": voices,
                     "default": {"voice_mode": default_mode, "voice": default_voice},
                     "chosen": core.get_event_tts_voice(),
+                    "delivery_mode": core.get_event_tts_delivery_mode(),
                 }
             )
         except Exception as e:
@@ -413,19 +432,26 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
                 {"ok": False, "error": "text is required"},
                 status_code=400,
             )
+        delivery_mode = normalize_delivery_mode(
+            body.get("delivery_mode") or core.get_event_tts_delivery_mode()
+        )
+        spoken_text = apply_delivery_mode(text, delivery_mode)
         body_mode = str(body.get("voice_mode") or "").strip()
         body_voice = str(body.get("voice") or "").strip()
         if body_mode and body_voice:
-            speak_cfg = apply_voice_override(
-                cfg,
-                voice_mode=body_mode,
-                voice=body_voice,
+            speak_cfg = apply_delivery_mode_settings(
+                apply_voice_override(
+                    cfg,
+                    voice_mode=body_mode,
+                    voice=body_voice,
+                ),
+                delivery_mode,
             )
         else:
             speak_cfg = core.get_event_tts_settings()
         try:
             audio, media_type, from_cache, saved_path = await get_or_synthesize_speech(
-                text, settings=speak_cfg
+                spoken_text, settings=speak_cfg
             )
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)

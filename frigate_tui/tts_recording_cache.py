@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from frigate_tui.delivery_modes import normalize_delivery_mode
 from frigate_tui.models import normalize_sub_label
 
 _MAX_BASENAME_LEN = 120
@@ -26,22 +27,73 @@ def event_voice_pref_path(cache_dir: str) -> Path:
     return resolve_recordings_dir(cache_dir) / ".event_voice.json"
 
 
-def load_event_voice_pref(cache_dir: str) -> dict[str, str] | None:
-    """Return {voice_mode, voice} when a saved UI voice preference exists."""
+def load_event_tts_prefs(cache_dir: str) -> dict[str, str]:
+    """Return saved UI TTS prefs: voice_mode, voice, delivery_mode."""
     path = event_voice_pref_path(cache_dir)
+    prefs: dict[str, str] = {"delivery_mode": "normal"}
     if not path.is_file():
-        return None
+        return prefs
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        return None
+        return prefs
     if not isinstance(data, dict):
-        return None
+        return prefs
     mode = str(data.get("voice_mode") or "").strip().lower()
     voice = str(data.get("voice") or "").strip()
-    if mode not in ("clone", "predefined") or not voice:
-        return None
-    return {"voice_mode": mode, "voice": voice}
+    if mode in ("clone", "predefined") and voice:
+        prefs["voice_mode"] = mode
+        prefs["voice"] = voice
+    prefs["delivery_mode"] = normalize_delivery_mode(data.get("delivery_mode"))
+    return prefs
+
+
+def load_event_voice_pref(cache_dir: str) -> dict[str, str] | None:
+    """Return {voice_mode, voice} when a saved UI voice preference exists."""
+    prefs = load_event_tts_prefs(cache_dir)
+    mode = prefs.get("voice_mode")
+    voice = prefs.get("voice")
+    if mode in ("clone", "predefined") and voice:
+        return {"voice_mode": mode, "voice": voice}
+    return None
+
+
+def save_event_tts_prefs(
+    cache_dir: str,
+    *,
+    voice_mode: str | None = None,
+    voice: str | None = None,
+    delivery_mode: str | None = None,
+) -> None:
+    """Persist UI TTS prefs for event alerts and manual Speak tests."""
+    path = event_voice_pref_path(cache_dir)
+    existing = load_event_tts_prefs(cache_dir)
+    mode = str(voice_mode if voice_mode is not None else existing.get("voice_mode") or "").strip().lower()
+    name = str(voice if voice is not None else existing.get("voice") or "").strip()
+    delivery = normalize_delivery_mode(
+        delivery_mode if delivery_mode is not None else existing.get("delivery_mode")
+    )
+    if mode in ("clone", "predefined") and name:
+        path.write_text(
+            json.dumps(
+                {"voice_mode": mode, "voice": name, "delivery_mode": delivery},
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return
+    if delivery != "normal":
+        path.write_text(
+            json.dumps({"delivery_mode": delivery}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return
+    if path.is_file():
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def save_event_voice_pref(
@@ -51,20 +103,7 @@ def save_event_voice_pref(
     voice: str | None = None,
 ) -> None:
     """Persist or clear the UI-chosen voice for event alert TTS."""
-    path = event_voice_pref_path(cache_dir)
-    mode = str(voice_mode or "").strip().lower()
-    name = str(voice or "").strip()
-    if mode in ("clone", "predefined") and name:
-        path.write_text(
-            json.dumps({"voice_mode": mode, "voice": name}, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        return
-    if path.is_file():
-        try:
-            path.unlink()
-        except OSError:
-            pass
+    save_event_tts_prefs(cache_dir, voice_mode=voice_mode, voice=voice)
 
 
 def voice_key_from_settings(settings: dict[str, Any]) -> str:
@@ -95,10 +134,13 @@ def recording_filename(text: str, *, settings: dict[str, Any]) -> str:
         message_slug = "message"
 
     voice_slug = _slug_part(Path(voice_key_from_settings(settings)).stem, max_len=48)
+    mode_slug = _slug_part(normalize_delivery_mode(settings.get("delivery_mode")), max_len=16)
+    parts = [message_slug]
     if voice_slug:
-        base = f"{message_slug}__{voice_slug}"
-    else:
-        base = message_slug
+        parts.append(voice_slug)
+    if mode_slug and mode_slug != "normal":
+        parts.append(mode_slug)
+    base = "__".join(parts)
 
     return f"{base}.{output_format}"
 

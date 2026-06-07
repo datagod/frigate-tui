@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 
+from frigate_tui.delivery_modes import normalize_delivery_mode
 from frigate_tui.tts_recording_cache import (
     load_cached_recording,
     recording_path,
@@ -51,6 +52,7 @@ def chatterbox_settings_from_config(raw: dict[str, Any] | None) -> dict[str, Any
         ),
         "event_template": str(cfg.get("event_template", "{label} on {camera}")).strip()
         or "{label} on {camera}",
+        "delivery_mode": normalize_delivery_mode(cfg.get("delivery_mode")),
     }
 
 
@@ -75,6 +77,16 @@ def apply_voice_override(
     elif mode == "predefined":
         merged["voice_mode"] = "predefined"
         merged["predefined_voice_id"] = name
+    return merged
+
+
+def apply_delivery_mode_settings(
+    settings: dict[str, Any],
+    mode: str | None = None,
+) -> dict[str, Any]:
+    """Return settings copy tagged with delivery_mode (for cache keys only)."""
+    merged = dict(settings)
+    merged["delivery_mode"] = normalize_delivery_mode(mode or merged.get("delivery_mode"))
     return merged
 
 
