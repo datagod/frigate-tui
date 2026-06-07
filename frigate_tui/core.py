@@ -1153,8 +1153,18 @@ class FrigateMonitorCore:
         review_probe: dict[str, Any] | None = None
         if not self.demo and self._client and self.connection_ok:
             try:
-                reviews_raw = await self._client.get_review_items(limit=30)
-                review_probe = frigate_review_genai_probe(reviews_raw, hours=1.0)
+                reviews_raw = await self._client.get_review_items(limit=50)
+                frigate_cfg = frigate_cfg or await self._get_frigate_config_cached()
+                review_cfg = None
+                if isinstance(frigate_cfg, dict) and isinstance(frigate_cfg.get("review"), dict):
+                    review_cfg = frigate_cfg["review"].get("genai")
+                    if not isinstance(review_cfg, dict):
+                        review_cfg = None
+                review_probe = frigate_review_genai_probe(
+                    reviews_raw,
+                    hours=1.0,
+                    review_genai_cfg=review_cfg,
+                )
             except Exception:
                 review_probe = None
         health = await collect_genai_health(

@@ -797,28 +797,85 @@
         lines.push(`<div><span class="text-[#6b7280]">Summary LLM:</span> ${llmLine}</div>`);
       }
 
+      const frp = gh.frigate_review_probe || {};
+      const svc = gh.genai_service || {};
+      if (svc.summary) {
+        const svcCls = svc.status_color || 'dim';
+        lines.push(
+          `<div class="mt-1"><span class="text-[#6b7280]">GenAI service:</span> `
+          + `<span class="${svcCls}">${escapeHtml(svc.summary)}</span></div>`
+        );
+        if (svc.likely_context_overflow) {
+          lines.push(
+            '<div class="bad text-[11px]">Ollama context too small or stale — multi-image reviews may crash. '
+            + 'Set num_ctx ≥32768 in Frigate config and reload/unload the model in Ollama.</div>'
+          );
+        } else if ((frp.eligible_missing_genai_1h || 0) > 0 || (svc.missing_genai_reviews_1h || 0) > 0) {
+          lines.push(
+            '<div class="warn text-[11px]">Some eligible reviews lacked GenAI metadata — check Frigate logs '
+            + '(timeouts, model errors, or context overflow before the fix).</div>'
+          );
+        }
+      }
+
       const fg = gh.frigate_genai;
       if (fg && fg.configured) {
         const en = fg.enabled ? 'enabled' : 'disabled';
         const prov = fg.provider ? ` · ${escapeHtml(fg.provider)}` : '';
         const mdl = fg.model ? ` · ${escapeHtml(fg.model)}` : '';
-        lines.push(`<div><span class="text-[#6b7280]">Frigate GenAI:</span> ${en}${prov}${mdl}</div>`);
+        const ctx = fg.num_ctx ? ` · num_ctx=${Number(fg.num_ctx).toLocaleString()}` : '';
+        const img = fg.review_image_source ? ` · images=${escapeHtml(fg.review_image_source)}` : '';
+        const objEn = fg.objects_genai_enabled ? 'object-desc=on' : 'object-desc=off';
+        const revDet = fg.review_detections ? 'review-detections=on' : 'review-detections=off';
+        const featCls = (fg.objects_genai_enabled && fg.review_detections) ? 'good'
+          : ((!fg.objects_genai_enabled && !fg.review_detections) ? 'warn' : 'dim');
+        lines.push(`<div><span class="text-[#6b7280]">Frigate GenAI:</span> ${en}${prov}${mdl}${ctx}${img}</div>`);
+        lines.push(
+          `<div class="text-[11px]"><span class="text-[#6b7280]">Features:</span> `
+          + `<span class="${featCls}">${objEn} · review-alerts=on · ${revDet}</span></div>`
+        );
       } else if (fg) {
         lines.push('<div><span class="text-[#6b7280]">Frigate GenAI:</span> not in Frigate config</div>');
       }
 
-      const frp = gh.frigate_review_probe;
-      if (frp && frp.reviews_1h != null) {
-        const withG = frp.reviews_with_genai_1h ?? 0;
-        const total = frp.reviews_1h ?? 0;
-        const done = frp.reviews_completed_1h ?? 0;
-        const cls = withG > 0 ? 'good' : (done > 0 ? 'warn' : 'dim');
+      const ocp = gh.ollama_context_probe;
+      if (ocp && ocp.context_summary) {
+        const ctxCls = ocp.context_status === 'ok' ? 'good'
+          : (ocp.context_status === 'stale' || ocp.context_status === 'too_small' ? 'bad' : 'warn');
+        let ctxLine = escapeHtml(ocp.context_summary);
+        if (ocp.loaded_context_length != null) {
+          ctxLine += ` · loaded=${Number(ocp.loaded_context_length).toLocaleString()}`;
+        }
+        if (ocp.configured_num_ctx != null) {
+          ctxLine += ` · configured=${Number(ocp.configured_num_ctx).toLocaleString()}`;
+        }
+        lines.push(`<div><span class="text-[#6b7280]">Ollama context:</span> <span class="${ctxCls}">${ctxLine}</span></div>`);
+      }
+
+      if (frp.reviews_1h != null) {
+        const eligibleOk = frp.eligible_with_genai_1h ?? frp.reviews_with_genai_1h ?? 0;
+        const eligibleDone = frp.eligible_completed_1h ?? frp.reviews_completed_1h ?? 0;
+        const missing = frp.eligible_missing_genai_1h ?? Math.max(0, eligibleDone - eligibleOk);
+        const rate = frp.genai_success_rate_1h;
+        const rateStr = rate != null ? ` · ${Math.round(rate * 100)}% success` : '';
+        const cls = eligibleDone === 0 ? 'dim'
+          : (eligibleOk === eligibleDone ? 'good' : (eligibleOk > 0 ? 'warn' : 'bad'));
         lines.push(
-          `<div><span class="text-[#6b7280]">Frigate reviews (1h):</span> `
-          + `<span class="${cls}">${withG}/${total} with GenAI metadata</span>`
-          + (done ? ` · ${done} completed` : '')
+          `<div><span class="text-[#6b7280]">Review summaries (1h):</span> `
+          + `<span class="${cls}">${eligibleOk}/${eligibleDone} eligible succeeded</span>`
+          + (missing ? ` · ${missing} failed` : '')
+          + rateStr
           + `</div>`
         );
+        const alertOk = frp.alerts_with_genai_1h;
+        const alertDone = frp.alerts_completed_1h;
+        if (alertDone != null && alertDone > 0) {
+          const alertCls = alertOk === alertDone ? 'good' : (alertOk > 0 ? 'warn' : 'bad');
+          lines.push(
+            `<div class="text-[11px]"><span class="text-[#6b7280]">Alerts only:</span> `
+            + `<span class="${alertCls}">${alertOk ?? 0}/${alertDone} with GenAI metadata</span></div>`
+          );
+        }
       }
 
       if (gh.checked_at) {
