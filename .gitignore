@@ -13,3 +13,7 @@ reports/*
 # Cached Chatterbox TTS recordings (keep localrecordings/.gitkeep in git)
 localrecordings/*
 !localrecordings/.gitkeep
+
+# Python bytecode cache
+__pycache__/
+*.pyc
