@@ -23,6 +23,7 @@ from frigate_tui.chatterbox_tts import apply_voice_override, chatterbox_settings
 from frigate_tui.tts_recording_cache import (
     format_event_tts_message,
     load_event_voice_pref,
+    resolve_event_tts_label,
     save_event_voice_pref,
 )
 from frigate_tui.local_time import (
@@ -616,14 +617,19 @@ class FrigateMonitorCore:
             cut = cut.rsplit(" ", 1)[0]
         return cut.rstrip(".,;:") + "…"
 
-    def _detection_alerts_enabled(self) -> bool:
+    def _event_alerts_enabled(self) -> bool:
+        if not self.web_alerts_enabled:
+            return False
+        return bool(self.chatterbox_tts_config.get("event_alerts"))
+
+    def _timeline_alerts_enabled(self) -> bool:
         if not self.web_alerts_enabled:
             return False
         cfg = self.chatterbox_tts_config
-        return bool(
-            cfg.get("event_alerts")
-            or cfg.get("timeline_alerts", cfg.get("event_alerts", False))
-        )
+        return bool(cfg.get("timeline_alerts", cfg.get("event_alerts", False)))
+
+    def _detection_alerts_enabled(self) -> bool:
+        return self._event_alerts_enabled() or self._timeline_alerts_enabled()
 
     def _detection_alert_cooldown(self) -> float:
         cfg = self.chatterbox_tts_config
@@ -634,19 +640,18 @@ class FrigateMonitorCore:
     def _detection_alert_key(
         self,
         *,
-        det_id: str,
         camera: str,
         label: str,
         sub_label: str | None,
     ) -> str:
-        sub = normalize_sub_label(sub_label) or ""
-        sid = (det_id or "").strip() or f"anon:{camera}:{label}:{sub}"
-        return f"{sid}|{camera}|{label}|{sub}"
+        """Cooldown bucket for what the user hears, e.g. family on amcrest1."""
+        spoken = resolve_event_tts_label(label, sub_label).strip().lower()
+        cam = (camera or "camera").strip().lower()
+        return f"{cam}|{spoken}"
 
     def _should_emit_detection_alert(
         self,
         *,
-        det_id: str,
         camera: str,
         label: str,
         sub_label: str | None,
@@ -654,7 +659,6 @@ class FrigateMonitorCore:
         if not self._detection_alerts_enabled():
             return False
         key = self._detection_alert_key(
-            det_id=det_id,
             camera=camera,
             label=label,
             sub_label=sub_label,
@@ -672,8 +676,18 @@ class FrigateMonitorCore:
             }
         return True
 
-    def _notify_event_alerts(self, detections: list[dict[str, Any]]) -> None:
-        if not detections or not self._detection_alerts_enabled():
+    def _notify_event_alerts(
+        self,
+        detections: list[dict[str, Any]],
+        *,
+        source: str = "event",
+    ) -> None:
+        if not detections:
+            return
+        if source == "timeline":
+            if not self._timeline_alerts_enabled():
+                return
+        elif not self._event_alerts_enabled():
             return
         tts_cfg = self.chatterbox_tts_config
         use_tts = bool(tts_cfg.get("enabled"))
@@ -685,7 +699,6 @@ class FrigateMonitorCore:
             camera = str(det.get("camera") or "camera")
             det_id = str(det.get("id") or "")
             if not self._should_emit_detection_alert(
-                det_id=det_id,
                 camera=camera,
                 label=label,
                 sub_label=sub_label,
@@ -709,11 +722,13 @@ class FrigateMonitorCore:
             self._notify("event_alerts", alert_items)
 
     def _maybe_emit_timeline_alert(self, entry: TimelineEntry) -> None:
+        if not self._timeline_alerts_enabled():
+            return
         if entry.class_type not in ("visible", "active"):
             return
         sub_label = normalize_sub_label(entry.sub_label)
         display = f"{entry.label} ({sub_label})" if sub_label else entry.label
-        det_id = (entry.source_id or "").strip() or f"timeline-{entry.timestamp:.3f}"
+        det_id = (entry.source_id or "").strip()
         self._notify_event_alerts(
             [
                 {
@@ -724,6 +739,7 @@ class FrigateMonitorCore:
                     "display_label": display,
                 }
             ],
+            source="timeline",
         )
 
     def _should_log_timeline_entry(self, entry: TimelineEntry) -> bool:

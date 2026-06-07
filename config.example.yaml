@@ -63,7 +63,7 @@ chatterbox_tts:
   cache_dir: localrecordings   # cached WAV/MP3 keyed by message text; replayed without calling Chatterbox
   event_alerts: true           # MQTT/HTTP new events: log, speak "{label} on {camera}"
   timeline_alerts: true        # timeline visible/active detections: same log + TTS pipeline
-  alert_cooldown: 120          # seconds before the same detection (any path) can alert again
+  alert_cooldown: 120          # seconds before the same spoken alert (camera + label/tag) can repeat
   event_template: "{label} on {camera}"
   default_test_message: "Person detected on driveway."
 
