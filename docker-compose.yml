@@ -83,6 +83,8 @@ services:
       - ./sounds:/app/sounds:ro
       - ./reports:/app/reports
       - ./localrecordings:/app/localrecordings
+      # Logs tab: read Frigate container logs via Docker API (read-only socket).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
       # Video History tab: Frigate continuous recordings (read-only).
       - /storage/recordings:/storage/recordings:ro
       - /etc/localtime:/etc/localtime:ro

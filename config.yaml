@@ -44,6 +44,12 @@ chatterbox_tts:
   event_template: "{label} on {camera}"
   default_test_message: "Person detected on driveway."
 
+# Logs tab — live Docker logs from the Frigate container (mount docker.sock in docker-compose)
+frigate_logs:
+  enabled: true
+  container: frigate
+  initial_lines: 200
+
 # Video History tab — browse Frigate continuous recordings (mount directory in docker-compose)
 video_history:
   enabled: true

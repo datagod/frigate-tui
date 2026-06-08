@@ -37,6 +37,11 @@ from frigate_tui.tts_recording_cache import (
     resolve_recordings_dir,
     safe_recording_filename,
 )
+from frigate_tui.docker_logs import (
+    docker_socket_available,
+    inspect_container,
+    stream_container_logs,
+)
 from frigate_tui.video_history import (
     list_videos,
     media_type_for_video,
@@ -212,6 +217,84 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
 
     def _video_history_settings() -> dict[str, Any]:
         return dict(core.video_history_config or {})
+
+    def _frigate_logs_settings() -> dict[str, Any]:
+        return dict(core.frigate_logs_config or {})
+
+    @app.get("/api/frigate-logs")
+    async def api_frigate_logs_status():
+        """Container metadata for the Logs tab."""
+        cfg = _frigate_logs_settings()
+        if not cfg.get("enabled"):
+            return JSONResponse(
+                {"ok": False, "error": "Frigate Logs is disabled in config."},
+                status_code=503,
+            )
+        docker_socket = str(cfg.get("docker_socket") or "/var/run/docker.sock")
+        container = str(cfg.get("container") or "frigate")
+        info = await inspect_container(container, docker_socket=docker_socket)
+        return JSONResponse(
+            {
+                "ok": bool(info.get("ok")),
+                "enabled": True,
+                "container": container,
+                "initial_lines": int(cfg.get("initial_lines") or 200),
+                "docker_socket": docker_socket,
+                "socket_available": docker_socket_available(docker_socket),
+                "container_info": info,
+                "error": info.get("error"),
+            }
+        )
+
+    @app.get("/api/frigate-logs/stream")
+    async def api_frigate_logs_stream(request: Request):
+        """SSE stream of Docker logs: last N lines, then follow new output."""
+        cfg = _frigate_logs_settings()
+        if not cfg.get("enabled"):
+            return JSONResponse(
+                {"ok": False, "error": "Frigate Logs is disabled in config."},
+                status_code=503,
+            )
+        docker_socket = str(cfg.get("docker_socket") or "/var/run/docker.sock")
+        container = str(cfg.get("container") or "frigate")
+        initial_lines = int(cfg.get("initial_lines") or 200)
+
+        async def event_generator():
+            hello = {
+                "type": "hello",
+                "container": container,
+                "initial_lines": initial_lines,
+            }
+            yield f"data: {json.dumps(hello)}\n\n"
+            try:
+                async for line in stream_container_logs(
+                    container,
+                    docker_socket=docker_socket,
+                    initial_lines=initial_lines,
+                ):
+                    if await request.is_disconnected():
+                        break
+                    payload = {"type": "line", "line": line}
+                    yield f"data: {json.dumps(payload, default=str)}\n\n"
+            except FileNotFoundError as e:
+                payload = {"type": "error", "message": str(e)}
+                yield f"data: {json.dumps(payload)}\n\n"
+            except LookupError as e:
+                payload = {"type": "error", "message": str(e)}
+                yield f"data: {json.dumps(payload)}\n\n"
+            except Exception as e:
+                payload = {"type": "error", "message": f"{type(e).__name__}: {e}"}
+                yield f"data: {json.dumps(payload)}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.get("/api/video-history")
     async def api_video_history(camera: str | None = None):

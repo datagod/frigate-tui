@@ -49,6 +49,18 @@
 
     .camera-card { background: #161b26; border: 1px solid #4a5263; }
     .activity-log { background: #0c0e14; border-left: 1px solid #4a5263; }
+    .frigate-logs-view {
+      background: #0c0e14;
+      border: 1px solid #4a5263;
+      color: #9ca3af;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 11px;
+      line-height: 1.35;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .frigate-logs-view .log-line { padding: 0 0 1px; }
+    .frigate-logs-view .log-line.stderr { color: #f87171; }
 
     table.data-table { background: #0f1117; }
     .data-table th, .data-table td { padding: 4px 8px; }
@@ -173,6 +185,7 @@
         <div onclick="switchTab('genai-log')" id="tab-genai-log" class="tab">GenAI Log</div>
         <div onclick="switchTab('recordings')" id="tab-recordings" class="tab">AudioAlerts</div>
         <div onclick="switchTab('video-history')" id="tab-video-history" class="tab">Video History</div>
+        <div onclick="switchTab('logs')" id="tab-logs" class="tab">Logs</div>
       </div>
 
       <!-- Tab contents -->
@@ -227,6 +240,7 @@
                 <option value="conspiracy">Conspiracy</option>
                 <option value="panicky">Panicky</option>
                 <option value="neurotic">Neurotic</option>
+                <option value="playful">Playful</option>
               </select>
             </div>
             <div class="flex flex-wrap items-center gap-2 text-xs">
@@ -419,6 +433,33 @@
           </div>
         </div>
 
+        <!-- Logs: live Docker output from the Frigate container -->
+        <div id="pane-logs" class="hidden flex flex-col min-h-0 h-full">
+          <div class="flex flex-wrap items-center gap-2 mb-2 text-xs">
+            <span class="text-[#6b7280]">Docker logs for</span>
+            <span id="frigate-logs-container" class="font-mono text-[#c0c5d1]">frigate</span>
+            <span id="frigate-logs-state" class="text-[#6b7280]"></span>
+            <button type="button" onclick="clearFrigateLogs()"
+              class="px-2 py-1 rounded border border-[#4a5263] text-[#9ca3af] hover:text-white">
+              Clear
+            </button>
+            <button type="button" onclick="reconnectFrigateLogs()"
+              class="px-2 py-1 rounded border border-[#4a5263] text-[#9ca3af] hover:text-white">
+              Reconnect
+            </button>
+            <span id="frigate-logs-status" class="text-[#6b7280] ml-1"></span>
+          </div>
+          <p class="text-[10px] text-[#6b7280] mb-2">
+            Shows the oldest <span id="frigate-logs-initial-count" class="font-mono">200</span> lines from the running
+            Frigate container, then streams new log output live. Mount
+            <span class="font-mono">/var/run/docker.sock</span> into the web container and set
+            <span class="font-mono">frigate_logs.container</span> in config.
+          </p>
+          <div id="frigate-logs-view" class="frigate-logs-view flex-1 overflow-auto p-2 max-h-[calc(100vh-260px)]">
+            <div id="frigate-logs-lines" class="min-h-full"></div>
+          </div>
+        </div>
+
         <!-- GenAI Log: chronological messages, newest first -->
         <div id="pane-genai-log" class="hidden flex flex-col min-h-0 h-full">
           <div class="flex flex-wrap items-center gap-2 mb-2 text-xs">
@@ -604,6 +645,9 @@
     let cameraSkippedAvgChart = null;
 
     function switchTab(name) {
+      if (currentTab === 'logs' && name !== 'logs') {
+        stopFrigateLogsStream();
+      }
       document.querySelectorAll('[id^="pane-"]').forEach(el => el.classList.add('hidden'));
       document.querySelectorAll('[id^="tab-"]').forEach(el => el.classList.remove('active'));
       const pane = document.getElementById('pane-' + name);
@@ -629,6 +673,9 @@
       }
       if (name === 'video-history') {
         loadVideoHistory(false);
+      }
+      if (name === 'logs') {
+        startFrigateLogsTab();
       }
       if (name === 'summary') {
         syncSummaryReportLayout();
@@ -1569,7 +1616,7 @@
 
     const CHATTERBOX_VOICE_STORAGE_KEY = 'frigate-tui-tts-test-voice';
     const CHATTERBOX_MODE_STORAGE_KEY = 'frigate-tui-tts-delivery-mode';
-    const CHATTERBOX_DELIVERY_MODES = ['normal', 'conspiracy', 'panicky', 'neurotic'];
+    const CHATTERBOX_DELIVERY_MODES = ['normal', 'conspiracy', 'panicky', 'neurotic', 'playful'];
 
     function setupChatterboxTtsPanel(snap) {
       const panel = document.getElementById('chatterbox-tts-panel');
@@ -2073,6 +2120,31 @@
       aiEl.innerHTML = parts.join('');
     }
 
+    function renderModalMedia(mediaEl, ev) {
+      if (!mediaEl || !ev) return;
+      mediaEl.innerHTML = '';
+      if (ev.has_snapshot) {
+        const img = document.createElement('img');
+        img.src = `/api/snapshot/${encodeURIComponent(ev.id)}?bbox=1`;
+        img.className = 'max-w-full max-h-[min(50vh,420px)] rounded border border-[#4a5263]';
+        img.onerror = () => {
+          img.alt = 'Snapshot not available (may have expired, not recorded, or an error occurred)';
+        };
+        mediaEl.appendChild(img);
+      }
+      if (ev.has_clip) {
+        const a = document.createElement('a');
+        a.href = `/api/clip/${encodeURIComponent(ev.id)}`;
+        a.target = '_blank';
+        a.className = 'inline-block mt-2 underline';
+        a.textContent = '📼 Open clip in new tab';
+        mediaEl.appendChild(a);
+      }
+      if (!ev.has_snapshot && !ev.has_clip) {
+        mediaEl.innerHTML = '<div class="text-xs text-[#6b7280]">No media for this event.</div>';
+      }
+    }
+
     function showEventModal(ev) {
       const modal = document.getElementById('modal');
       const title = document.getElementById('modal-title');
@@ -2090,25 +2162,7 @@
       aiEl.classList.remove('hidden');
       aiEl.innerHTML = '<div class="text-xs text-[#6b7280]">Loading AI description…</div>';
 
-      media.innerHTML = '';
-      if (ev.has_snapshot) {
-        const img = document.createElement('img');
-        img.src = `/api/snapshot/${ev.id}?bbox=1`;
-        img.className = 'max-w-full max-h-[min(50vh,420px)] rounded border border-[#4a5263]';
-        img.onerror = () => { img.alt = 'Snapshot not available (may have expired, not recorded, or an error occurred)'; };
-        media.appendChild(img);
-      }
-      if (ev.has_clip) {
-        const a = document.createElement('a');
-        a.href = `/api/clip/${ev.id}`;
-        a.target = '_blank';
-        a.className = 'inline-block mt-2 underline';
-        a.textContent = '📼 Open clip in new tab';
-        media.appendChild(a);
-      }
-      if (!ev.has_snapshot && !ev.has_clip) {
-        media.innerHTML = '<div class="text-xs text-[#6b7280]">No media for this event.</div>';
-      }
+      renderModalMedia(media, ev);
 
       modal.classList.remove('hidden');
       modal.classList.add('flex');
@@ -2126,6 +2180,8 @@
           const fresh = data.event || ev;
           if (fresh.description) ev.description = fresh.description;
           if (fresh.has_snapshot != null) ev.has_snapshot = fresh.has_snapshot;
+          if (fresh.has_clip != null) ev.has_clip = fresh.has_clip;
+          renderModalMedia(media, ev);
           renderModalAiSection(aiEl, fresh, data.review_genai || null);
         })
         .catch(() => {
@@ -2762,6 +2818,150 @@
     function openVideoHistoryRow(path) {
       const item = videoHistoryListCache.find((v) => v.path === path);
       if (item) showVideoModal(item);
+    }
+
+    let frigateLogsES = null;
+    let frigateLogsStickBottom = true;
+    let frigateLogsLineCount = 0;
+    const FRIGATE_LOGS_MAX_DOM_LINES = 3000;
+
+    function stopFrigateLogsStream() {
+      if (frigateLogsES) {
+        frigateLogsES.close();
+        frigateLogsES = null;
+      }
+    }
+
+    function clearFrigateLogs() {
+      const lines = document.getElementById('frigate-logs-lines');
+      if (lines) lines.innerHTML = '';
+      frigateLogsLineCount = 0;
+      const status = document.getElementById('frigate-logs-status');
+      if (status) status.textContent = 'Cleared';
+    }
+
+    function appendFrigateLogLine(line) {
+      const container = document.getElementById('frigate-logs-lines');
+      const view = document.getElementById('frigate-logs-view');
+      if (!container || !view) return;
+      const div = document.createElement('div');
+      div.className = 'log-line';
+      div.textContent = line;
+      container.appendChild(div);
+      frigateLogsLineCount += 1;
+      while (frigateLogsLineCount > FRIGATE_LOGS_MAX_DOM_LINES && container.firstChild) {
+        container.removeChild(container.firstChild);
+        frigateLogsLineCount -= 1;
+      }
+      if (frigateLogsStickBottom) {
+        view.scrollTop = view.scrollHeight;
+      }
+    }
+
+    function bindFrigateLogsScroll() {
+      const view = document.getElementById('frigate-logs-view');
+      if (!view || view.dataset.bound) return;
+      view.dataset.bound = '1';
+      view.addEventListener('scroll', () => {
+        const nearBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 48;
+        frigateLogsStickBottom = nearBottom;
+      });
+    }
+
+    function setFrigateLogsStatus(text, isError) {
+      const status = document.getElementById('frigate-logs-status');
+      if (!status) return;
+      status.textContent = text || '';
+      status.className = isError ? 'text-[#ef4444] ml-1' : 'text-[#6b7280] ml-1';
+    }
+
+    function connectFrigateLogsStream() {
+      stopFrigateLogsStream();
+      setFrigateLogsStatus('Connecting…');
+      frigateLogsES = new EventSource('/api/frigate-logs/stream');
+
+      frigateLogsES.onopen = () => {
+        setFrigateLogsStatus('Live');
+      };
+
+      frigateLogsES.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'hello') {
+            const countEl = document.getElementById('frigate-logs-initial-count');
+            if (countEl && msg.initial_lines) countEl.textContent = String(msg.initial_lines);
+            const containerEl = document.getElementById('frigate-logs-container');
+            if (containerEl && msg.container) containerEl.textContent = msg.container;
+            setFrigateLogsStatus(`Streaming last ${msg.initial_lines || 200} lines…`);
+            return;
+          }
+          if (msg.type === 'line' && msg.line != null) {
+            appendFrigateLogLine(String(msg.line));
+            return;
+          }
+          if (msg.type === 'error') {
+            setFrigateLogsStatus(msg.message || 'Stream error', true);
+            stopFrigateLogsStream();
+          }
+        } catch (e) {}
+      };
+
+      frigateLogsES.onerror = () => {
+        if (frigateLogsES && frigateLogsES.readyState === 2) {
+          setFrigateLogsStatus('Disconnected — reconnecting…', true);
+          setTimeout(() => {
+            if (currentTab === 'logs') connectFrigateLogsStream();
+          }, 2500);
+        }
+      };
+    }
+
+    function reconnectFrigateLogs() {
+      clearFrigateLogs();
+      connectFrigateLogsStream();
+    }
+
+    async function startFrigateLogsTab() {
+      bindFrigateLogsScroll();
+      const stateEl = document.getElementById('frigate-logs-state');
+      const containerEl = document.getElementById('frigate-logs-container');
+      const snap = window.__lastSnap || {};
+      const cfg = snap.frigate_logs || {};
+      if (containerEl && cfg.container) containerEl.textContent = cfg.container;
+      const countEl = document.getElementById('frigate-logs-initial-count');
+      if (countEl && cfg.initial_lines) countEl.textContent = String(cfg.initial_lines);
+
+      try {
+        const r = await fetch('/api/frigate-logs');
+        const data = await r.json();
+        if (!r.ok || !data.ok) {
+          throw new Error((data && data.error) || `HTTP ${r.status}`);
+        }
+        const info = data.container_info || {};
+        if (stateEl) {
+          const bits = [];
+          if (info.state) bits.push(info.state);
+          if (info.id) bits.push(info.id);
+          stateEl.textContent = bits.length ? `(${bits.join(' · ')})` : '';
+        }
+        if (!data.socket_available) {
+          setFrigateLogsStatus('Docker socket not mounted', true);
+          stopFrigateLogsStream();
+          return;
+        }
+        if (!info.ok) {
+          setFrigateLogsStatus(info.error || 'Container unavailable', true);
+          stopFrigateLogsStream();
+          return;
+        }
+      } catch (e) {
+        if (stateEl) stateEl.textContent = '';
+        setFrigateLogsStatus(`Status check failed: ${e.message || e}`, true);
+      }
+
+      if (!frigateLogsES) {
+        connectFrigateLogsStream();
+      }
     }
 
     async function loadVideoHistory(force) {

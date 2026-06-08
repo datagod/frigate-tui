@@ -5,13 +5,14 @@ from __future__ import annotations
 import random
 from typing import Any
 
-DELIVERY_MODES: tuple[str, ...] = ("normal", "conspiracy", "panicky", "neurotic")
+DELIVERY_MODES: tuple[str, ...] = ("normal", "conspiracy", "panicky", "neurotic", "playful")
 
 _DELIVERY_MODE_LABELS = {
     "normal": "Normal",
     "conspiracy": "Conspiracy",
     "panicky": "Panicky",
     "neurotic": "Neurotic",
+    "playful": "Playful",
 }
 
 # Alex Jones–style follow-ups appended after the base detection text.
@@ -274,6 +275,110 @@ NEUROTIC_PHRASES: tuple[str, ...] = (
     "Is this going to be the thing I obsess over tonight?",
 )
 
+# Flirty follow-ups appended after the base detection text.
+PLAYFUL_PHRASES: tuple[str, ...] = (
+    "Oh my!",
+    "Wow, that looks good.",
+    "Yummy!",
+    "Hello there.",
+    "Well, hello handsome.",
+    "My, my, my.",
+    "Be still my heart.",
+    "Ooh la la!",
+    "Hubba hubba.",
+    "Looking sharp out there.",
+    "Don't mind me staring.",
+    "That's a nice view.",
+    "Come here often?",
+    "Caught my eye.",
+    "Check you out.",
+    "Yes please.",
+    "Dreamy.",
+    "You're making me blush.",
+    "Come on over.",
+    "Miss me yet?",
+    "Nice move.",
+    "That's the one.",
+    "Well aren't you something.",
+    "Looking good, sweetheart.",
+    "Stop being so cute.",
+    "Well hello, stranger.",
+    "Aren't you a sight.",
+    "My heart just skipped.",
+    "That's what I like to see.",
+    "Come to mama.",
+    "Looking delicious.",
+    "Oh you tease.",
+    "My oh my.",
+    "Sweet thing.",
+    "Hello gorgeous.",
+    "That's tempting.",
+    "Come closer.",
+    "You're a keeper.",
+    "What a catch.",
+    "I'm impressed.",
+    "Very nice indeed.",
+    "That's the good stuff.",
+    "Hello, beautiful.",
+    "Well well well.",
+    "Look who's here.",
+    "Fancy meeting you.",
+    "You're trouble.",
+    "I see you.",
+    "Can't look away.",
+    "That's hot.",
+    "Hello, sunshine.",
+    "You're a whole mood.",
+    "Making hearts race.",
+    "Too cute to handle.",
+    "I'm not complaining.",
+    "That's a ten.",
+    "Chef's kiss.",
+    "Perfection.",
+    "Absolutely stunning.",
+    "You're killing me.",
+    "Sweet as pie.",
+    "Butterflies activated.",
+    "My type right there.",
+    "That's the vibe.",
+    "Hello, dreamboat.",
+    "Looking fine today.",
+    "You clean up nice.",
+    "That's irresistible.",
+    "Come say hi.",
+    "Worth the wait.",
+    "Hello, cutie pie.",
+    "You're a whole snack.",
+    "That's the highlight.",
+    "Making it interesting.",
+    "Oh, behave.",
+    "You're too much.",
+    "I'm swooning.",
+    "That's adorable.",
+    "Hello, heartbreaker.",
+    "Looking like trouble.",
+    "You got my attention.",
+    "That's a winner.",
+    "You're on fire.",
+    "That's the energy.",
+    "Come through.",
+    "Looking extra today.",
+    "You're a gem.",
+    "Hello, good lookin.",
+    "You're a vision.",
+    "Making me smile.",
+    "Oh, you're good.",
+    "Hello, charmer.",
+    "You're a delight.",
+    "Looking like a star.",
+    "You're a knockout.",
+    "Making my day.",
+    "Oh, I like that.",
+    "Hello, darling.",
+    "You're a flame.",
+    "Making hearts flutter.",
+)
+
 
 def normalize_delivery_mode(value: Any) -> str:
     mode = str(value or "normal").strip().lower()
@@ -294,8 +399,13 @@ def pick_neurotic_phrase() -> str:
     return random.choice(NEUROTIC_PHRASES)
 
 
+def pick_playful_phrase() -> str:
+    """Pick a random phrase from the playful pool."""
+    return random.choice(PLAYFUL_PHRASES)
+
+
 def apply_delivery_mode(text: str, mode: str) -> str:
-    """Rewrite alert text for conspiracy, panicky, or neurotic delivery styles."""
+    """Rewrite alert text for conspiracy, panicky, neurotic, or playful delivery styles."""
     base = (text or "").strip()
     if not base:
         return base
@@ -304,6 +414,8 @@ def apply_delivery_mode(text: str, mode: str) -> str:
         return f"{base}. {pick_conspiracy_phrase()}"
     if delivery == "neurotic":
         return f"{base}. {pick_neurotic_phrase()}"
+    if delivery == "playful":
+        return f"{base}. {pick_playful_phrase()}"
     if delivery == "panicky":
         return (
             f"Alert! Alert! {base}! "

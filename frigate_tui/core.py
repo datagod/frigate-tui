@@ -33,6 +33,7 @@ from frigate_tui.tts_recording_cache import (
     save_event_tts_prefs,
     save_event_voice_pref,
 )
+from frigate_tui.docker_logs import frigate_logs_settings_from_config
 from frigate_tui.video_history import video_history_settings_from_config
 from frigate_tui.local_time import (
     configured_timezone_name,
@@ -137,6 +138,9 @@ class FrigateMonitorCore:
         )
         self.video_history_config: dict[str, Any] = video_history_settings_from_config(
             s.get("video_history")
+        )
+        self.frigate_logs_config: dict[str, Any] = frigate_logs_settings_from_config(
+            s.get("frigate_logs")
         )
         saved_prefs = load_event_tts_prefs(
             self.chatterbox_tts_config.get("cache_dir", "localrecordings")
@@ -373,6 +377,11 @@ class FrigateMonitorCore:
                     "recordings_dir", "/media/frigate/recordings"
                 ),
                 "max_files": self.video_history_config.get("max_files", 500),
+            },
+            "frigate_logs": {
+                "enabled": self.frigate_logs_config.get("enabled", True),
+                "container": self.frigate_logs_config.get("container", "frigate"),
+                "initial_lines": self.frigate_logs_config.get("initial_lines", 200),
             },
             "chatterbox_tts": {
                 "enabled": self.chatterbox_tts_config.get("enabled", False),
