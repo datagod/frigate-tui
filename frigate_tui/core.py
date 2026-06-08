@@ -24,7 +24,7 @@ from frigate_tui.chatterbox_tts import (
     apply_voice_override,
     chatterbox_settings_from_config,
 )
-from frigate_tui.delivery_modes import DELIVERY_MODES, apply_delivery_mode, normalize_delivery_mode
+from frigate_tui.delivery_modes import DELIVERY_MODES, normalize_delivery_mode
 from frigate_tui.tts_recording_cache import (
     format_event_tts_message,
     load_event_tts_prefs,
@@ -761,10 +761,7 @@ class FrigateMonitorCore:
                     sub_label=sub_label,
                     template=tts_template,
                 )
-                item["tts_text"] = apply_delivery_mode(
-                    base_tts,
-                    self.get_event_tts_delivery_mode(),
-                )
+                item["tts_text"] = base_tts
             alert_items.append(item)
         if alert_items:
             self._notify("event_alerts", alert_items)

@@ -225,6 +225,7 @@
                 <option value="normal">Normal</option>
                 <option value="conspiracy">Conspiracy</option>
                 <option value="panicky">Panicky</option>
+                <option value="neurotic">Neurotic</option>
               </select>
             </div>
             <div class="flex flex-wrap items-center gap-2 text-xs">
@@ -1509,7 +1510,7 @@
 
     const CHATTERBOX_VOICE_STORAGE_KEY = 'frigate-tui-tts-test-voice';
     const CHATTERBOX_MODE_STORAGE_KEY = 'frigate-tui-tts-delivery-mode';
-    const CHATTERBOX_DELIVERY_MODES = ['normal', 'conspiracy', 'panicky'];
+    const CHATTERBOX_DELIVERY_MODES = ['normal', 'conspiracy', 'panicky', 'neurotic'];
 
     function setupChatterboxTtsPanel(snap) {
       const panel = document.getElementById('chatterbox-tts-panel');

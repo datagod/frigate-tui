@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from frigate_tui.delivery_modes import normalize_delivery_mode
+from frigate_tui.delivery_modes import apply_delivery_mode, normalize_delivery_mode
 from frigate_tui.tts_recording_cache import (
     load_cached_recording,
     recording_path,
@@ -211,10 +211,12 @@ async def warm_event_tts_recordings(core: Any, items: list[dict[str, Any]]) -> N
     if not cfg.get("enabled"):
         return
     voice = voice_key_from_settings(cfg)
+    delivery_mode = normalize_delivery_mode(cfg.get("delivery_mode"))
     for item in items or []:
-        text = str((item or {}).get("tts_text") or "").strip()
-        if not text:
+        base_text = str((item or {}).get("tts_text") or "").strip()
+        if not base_text:
             continue
+        text = apply_delivery_mode(base_text, delivery_mode)
         try:
             _audio, _mt, from_cache, saved_path = await get_or_synthesize_speech(
                 text, settings=cfg

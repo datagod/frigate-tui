@@ -5,12 +5,13 @@ from __future__ import annotations
 import random
 from typing import Any
 
-DELIVERY_MODES: tuple[str, ...] = ("normal", "conspiracy", "panicky")
+DELIVERY_MODES: tuple[str, ...] = ("normal", "conspiracy", "panicky", "neurotic")
 
 _DELIVERY_MODE_LABELS = {
     "normal": "Normal",
     "conspiracy": "Conspiracy",
     "panicky": "Panicky",
+    "neurotic": "Neurotic",
 }
 
 # Alex Jones–style follow-ups appended after the base detection text.
@@ -144,6 +145,110 @@ CONSPIRACY_PHRASES: tuple[str, ...] = (
     "Scripted!",
 )
 
+# Anxious follow-ups appended after the base detection text.
+NEUROTIC_PHRASES: tuple[str, ...] = (
+    "Oh dear!",
+    "Lookout!",
+    "I don't like the looks of this!",
+    "Something's not right here.",
+    "This makes me nervous.",
+    "I'm getting a bad feeling.",
+    "Should we be worried?",
+    "That doesn't look good.",
+    "Oh no, oh no.",
+    "My stomach just dropped.",
+    "This is giving me anxiety.",
+    "I have a bad feeling about this.",
+    "Please tell me I'm imagining things.",
+    "That's unsettling.",
+    "I'm not comfortable with this.",
+    "What was that?",
+    "Did you see that too?",
+    "This can't be good.",
+    "I'm freaking out a little.",
+    "My heart is racing.",
+    "That's really concerning.",
+    "I need to sit down.",
+    "Don't panic — I'm panicking.",
+    "Why is this happening?",
+    "I knew something felt off.",
+    "Yikes!",
+    "Uh-oh.",
+    "Here we go again.",
+    "Not again!",
+    "I'm spiraling.",
+    "Deep breaths. Deep breaths.",
+    "That's a no from me.",
+    "I'm officially worried.",
+    "This feels wrong.",
+    "My anxiety says run.",
+    "I don't feel safe.",
+    "That's not normal.",
+    "Who authorized this?",
+    "Call me paranoid, but still.",
+    "I'm not okay with this.",
+    "Red flag!",
+    "Major red flag!",
+    "My worry meter just spiked.",
+    "Cue the nervous sweats.",
+    "I need a minute.",
+    "I'm clutching my pearls.",
+    "Well, that's alarming.",
+    "That's a hard pass.",
+    "I'm side-eyeing this hard.",
+    "My cortisol just jumped.",
+    "This is too much.",
+    "I'm overthinking this already.",
+    "Bad vibes only.",
+    "I'm hearing doom music.",
+    "This ruined my whole mood.",
+    "I'm pacing now.",
+    "Lock the doors!",
+    "Check the backyard!",
+    "Is everyone accounted for?",
+    "Where's the dog?",
+    "Did we leave a window open?",
+    "This timing is suspicious.",
+    "That's awfully convenient.",
+    "I'm not buying it.",
+    "I'm on high alert now.",
+    "Stay frosty.",
+    "Eyes everywhere.",
+    "Don't look away.",
+    "I'm watching the replay.",
+    "This needs a second look.",
+    "I'm screenshotting this.",
+    "Who do we call first?",
+    "Should I hide?",
+    "I'm definitely not going outside.",
+    "My peace is gone.",
+    "There goes my calm evening.",
+    "I felt that in my chest.",
+    "That gave me chills.",
+    "I'm going to need tea after this.",
+    "Say it ain't so.",
+    "Please be a false alarm.",
+    "I'm begging this to be nothing.",
+    "My therapist warned me about days like this.",
+    "I knew I shouldn't have checked the cameras.",
+    "Why did I look?",
+    "Curiosity is a curse.",
+    "I'm regretting everything.",
+    "This is my villain origin story.",
+    "I'm too delicate for this.",
+    "My nervous system cannot.",
+    "I don't know what it is, but something about this whole situation is making my skin crawl.",
+    "Can we please double-check the locks? I'm not going to be able to sleep after seeing this.",
+    "I've been saying all week that something felt wrong, and now here's proof on camera.",
+    "This is exactly the kind of thing I warned everyone about, and nobody listened to me.",
+    "My hands are literally shaking — I hope you're taking this as seriously as I am.",
+    "I keep telling myself it's probably nothing, but my gut has never been wrong about this stuff.",
+    "We need to call someone. I don't care who — just please don't tell me to calm down.",
+    "I was already on edge today and this is absolutely the last thing I needed to see.",
+    "Something tells me we're not getting the full picture here, and that scares me even more.",
+    "I've replayed this in my head six different ways and none of them end well.",
+)
+
 
 def normalize_delivery_mode(value: Any) -> str:
     mode = str(value or "normal").strip().lower()
@@ -159,14 +264,21 @@ def pick_conspiracy_phrase() -> str:
     return random.choice(CONSPIRACY_PHRASES)
 
 
+def pick_neurotic_phrase() -> str:
+    """Pick a random phrase from the neurotic pool."""
+    return random.choice(NEUROTIC_PHRASES)
+
+
 def apply_delivery_mode(text: str, mode: str) -> str:
-    """Rewrite alert text for conspiracy or panicky delivery styles."""
+    """Rewrite alert text for conspiracy, panicky, or neurotic delivery styles."""
     base = (text or "").strip()
     if not base:
         return base
     delivery = normalize_delivery_mode(mode)
     if delivery == "conspiracy":
         return f"{base}. {pick_conspiracy_phrase()}"
+    if delivery == "neurotic":
+        return f"{base}. {pick_neurotic_phrase()}"
     if delivery == "panicky":
         return (
             f"Alert! Alert! {base}! "
