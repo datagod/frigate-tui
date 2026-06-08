@@ -32,14 +32,14 @@ def resolve_llm_settings(
 def build_summary_prompt(hours: float, context: str) -> str:
     return f"""You are writing a detailed home security activity briefing for a homeowner.
 
-Below are GenAI-generated messages from Frigate NVR cameras over the last {hours:g} hour(s), grouped by local hour (newest hour first). Each line includes camera name, object types, identified names (sub_labels), and review titles when present.
+Below are GenAI-generated messages from Frigate NVR cameras over the last {hours:g} hour(s), grouped by local hour (newest hour first). Each line includes camera name, object types, identified names (sub_labels), and review titles when present. Object events may include an indented GenAI description line — use those descriptions as primary detail when present.
 
 Write a clear, detailed, factual report using only simple Markdown (no code fences, no tables):
 1. First line must be exactly: ## Overall
-2. Then 2–4 sentences for the whole period. Name specific cameras, object types (person, car, dog, etc.), and identified people when the data includes them.
+2. Then 2–4 sentences for the whole period. Name specific cameras, object types (person, car, dog, etc.), identified people when the data includes them, and weave in GenAI object descriptions when provided.
 3. After Overall, write hour sections in the SAME order as the DATA (first hour line is the current/most recent hour).
 4. For each hour, use a heading exactly like: ## 22:00 (24-hour clock matching the hour line in DATA, no date, no extra words).
-5. Under each hour heading, write a detailed paragraph (3–6 sentences). Include which cameras had activity, what objects were detected, any named individuals, and notable patterns. Mention threat level only if non-zero.
+5. Under each hour heading, write a detailed paragraph (3–6 sentences). Include which cameras had activity, what objects were detected, any named individuals, and what the GenAI descriptions say happened. Mention threat level only if non-zero.
 6. Do not use ###, #, **, or bullet lists unless necessary. Do not invent cameras, objects, or people not in the DATA.
 
 DATA:

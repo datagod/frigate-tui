@@ -154,6 +154,38 @@ class FrigateEvent:
         return self.label
 
 
+def merge_frigate_event_updates(existing: FrigateEvent, incoming: FrigateEvent) -> FrigateEvent:
+    """Merge poll/MQTT event updates without dropping fields the other source already had."""
+
+    def _str(new: str | None, old: str | None) -> str | None:
+        return (new or "").strip() or old
+
+    def _opt_float(new: float | None, old: float | None) -> float | None:
+        return new if new is not None else old
+
+    def _lst(new: list[str], old: list[str]) -> list[str]:
+        return new if new else old
+
+    return FrigateEvent(
+        id=incoming.id or existing.id,
+        camera=incoming.camera or existing.camera,
+        label=incoming.label or existing.label,
+        start_time=incoming.start_time or existing.start_time,
+        end_time=_opt_float(incoming.end_time, existing.end_time),
+        top_score=_opt_float(incoming.top_score, existing.top_score),
+        has_snapshot=incoming.has_snapshot or existing.has_snapshot,
+        has_clip=incoming.has_clip or existing.has_clip,
+        zones=_lst(incoming.zones, existing.zones),
+        sub_label=_str(incoming.sub_label, existing.sub_label),
+        average_estimated_speed=_opt_float(
+            incoming.average_estimated_speed, existing.average_estimated_speed
+        ),
+        velocity_angle=_opt_float(incoming.velocity_angle, existing.velocity_angle),
+        attributes=_lst(incoming.attributes, existing.attributes),
+        description=_str(incoming.description, existing.description),
+    )
+
+
 @dataclass
 class ReviewItem:
     """Normalized review item from /api/review."""

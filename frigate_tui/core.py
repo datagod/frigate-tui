@@ -51,6 +51,7 @@ from frigate_tui.models import (
     FrigateEvent,
     ReviewItem,
     SystemHealth,
+    merge_frigate_event_updates,
     TimelineEntry,
     compute_health,
     parse_cameras,
@@ -278,6 +279,17 @@ class FrigateMonitorCore:
             fe = frigate_event_from_dict(raw)
             if fe is None:
                 return None
+            for i, existing in enumerate(self.recent_events):
+                if existing.id != fe.id:
+                    continue
+                merged = merge_frigate_event_updates(existing, fe)
+                if self._events_signature([merged]) != self._events_signature([existing]):
+                    self.recent_events[i] = merged
+                    self._sync_event_descriptions_to_genai_activity([merged])
+                    self._log_llm_description(merged, source="detail")
+                    self._notify("events", self.recent_events)
+                fe = merged
+                break
             review_genai: dict[str, Any] | None = None
             try:
                 for r in await self._client.get_review_items(limit=50):
@@ -806,13 +818,13 @@ class FrigateMonitorCore:
         threat: int | float | None = None,
         ref_id: str = "",
         ts: float | None = None,
-    ) -> None:
-        """Store structured GenAI output for the Activity Report tab (deduped by kind+ref_id)."""
+    ) -> bool:
+        """Store structured GenAI output for reports (upserted by kind+ref_id)."""
         if not ref_id:
-            return
+            return False
+        if not (text or "").strip() and not (title or "").strip():
+            return False
         key = f"{kind}:{ref_id}"
-        if key in self._genai_activity_keys:
-            return
         record = make_activity_record(
             kind=kind,
             camera=camera,
@@ -826,9 +838,52 @@ class FrigateMonitorCore:
             ts=ts,
             tz_name=self.display_timezone,
         )
+        for i, entry in enumerate(self.genai_activity):
+            if f"{entry.get('kind')}:{entry.get('ref_id')}" != key:
+                continue
+            old_text = (entry.get("text") or "").strip()
+            new_text = (text or "").strip()
+            if new_text and new_text != old_text:
+                self.genai_activity[i] = record
+                return True
+            return False
         self._genai_activity_keys.add(key)
         self.genai_activity.append(record)
         self._prune_genai_activity()
+        return True
+
+    def _sync_event_descriptions_to_genai_activity(
+        self,
+        events: list[FrigateEvent] | None = None,
+        *,
+        hours: float | None = None,
+    ) -> int:
+        """Ensure in-memory events with GenAI descriptions feed summary reports."""
+        import time
+
+        source = events if events is not None else self.recent_events
+        window_h = hours if hours is not None else self._genai_activity_hours_keep
+        cutoff = time.time() - max(0.25, window_h) * 3600.0
+        synced = 0
+        for event in source:
+            desc = (event.description or "").strip()
+            if not desc or not event.id or event.start_time < cutoff:
+                continue
+            obj_label = event.label or "object"
+            subs = [event.sub_label] if event.sub_label else []
+            if self._record_genai_activity(
+                kind="object",
+                camera=event.camera,
+                title=event.display_label or obj_label,
+                label=obj_label,
+                objects=[obj_label],
+                sub_labels=subs,
+                text=desc,
+                ref_id=event.id,
+                ts=event.start_time,
+            ):
+                synced += 1
+        return synced
 
     def _prune_genai_activity(self) -> None:
         import time
@@ -843,16 +898,24 @@ class FrigateMonitorCore:
 
     def get_genai_sections(self, hours: float | None = None) -> list[dict[str, Any]]:
         hrs = hours if hours is not None else self.genai_report_default_hours
+        self._sync_event_descriptions_to_genai_activity(hours=hrs)
         return group_by_hour(self.genai_activity, hrs)
 
     def get_genai_messages(self, hours: float | None = None) -> list[dict[str, Any]]:
         hrs = hours if hours is not None else self.genai_report_default_hours
+        self._sync_event_descriptions_to_genai_activity(hours=hrs)
         return list_chronological(self.genai_activity, hrs)
 
     async def generate_genai_report(self, hours: float | None = None) -> dict[str, Any]:
         """Build hourly sections and ask the configured LLM for a narrative report."""
         hrs = hours if hours is not None else self.genai_report_default_hours
-        sections = self.get_genai_sections(hrs)
+        synced = self._sync_event_descriptions_to_genai_activity(hours=hrs)
+        sections = group_by_hour(self.genai_activity, hrs)
+        if synced:
+            self.add_log(
+                f"Summary: synced {synced} event GenAI description(s) from the events list",
+                "info",
+            )
         if self.demo:
             report = (
                 "## Overall\n\n"
@@ -1101,8 +1164,14 @@ class FrigateMonitorCore:
                     ts=rev.start_time,
                 )
                 added += 1
+            event_synced = self._sync_event_descriptions_to_genai_activity()
             if added:
                 self.add_log(f"GenAI report: loaded {added} review summaries from Frigate history", "info")
+            if event_synced:
+                self.add_log(
+                    f"GenAI report: synced {event_synced} event description(s) from loaded events",
+                    "info",
+                )
         except Exception as e:
             self.add_log(f"GenAI history backfill error: {e}", "warning")
 
@@ -1168,14 +1237,15 @@ class FrigateMonitorCore:
         self._logged_llm_descriptions.add(event.id)
 
     def _surface_recent_llm_descriptions(self, events: list[FrigateEvent], *, limit: int = 3) -> None:
-        """Log a startup summary plus the newest descriptions already present in Frigate."""
+        """Seed summary data and log the newest descriptions already present in Frigate."""
+        synced = self._sync_event_descriptions_to_genai_activity(events)
         with_desc = [e for e in events if e.description]
         if not with_desc:
             return
-        self.add_log(
-            f"GenAI/LLM: {len(with_desc)} loaded event(s) already include descriptions",
-            "info",
-        )
+        msg = f"GenAI/LLM: {len(with_desc)} loaded event(s) already include descriptions"
+        if synced:
+            msg += f" ({synced} synced for Summary)"
+        self.add_log(msg, "info")
         for e in sorted(with_desc, key=lambda x: x.start_time, reverse=True)[:limit]:
             self._log_llm_description(e, source="startup")
 
@@ -1387,10 +1457,15 @@ class FrigateMonitorCore:
             if llm_source:
                 self._log_llm_description(fe, source=llm_source)
 
-        combined = incoming + self.recent_events
-        merged = sorted(
-            {e.id: e for e in combined}.values(), key=lambda x: x.start_time, reverse=True
-        )[: self.max_events]
+        by_id = {e.id: e for e in self.recent_events}
+        for fe in incoming:
+            if fe.id in by_id:
+                by_id[fe.id] = merge_frigate_event_updates(by_id[fe.id], fe)
+            else:
+                by_id[fe.id] = fe
+        merged = sorted(by_id.values(), key=lambda x: x.start_time, reverse=True)[
+            : self.max_events
+        ]
 
         if self._events_signature(merged) == self._events_signature(self.recent_events):
             return False
@@ -1407,6 +1482,7 @@ class FrigateMonitorCore:
             if not normalize_sub_label(prev.sub_label) and normalize_sub_label(e.sub_label):
                 sub_label_new.append(e)
         self.recent_events = merged
+        self._sync_event_descriptions_to_genai_activity(incoming)
         self._notify("events", self.recent_events)
         alert_events = new_only + [e for e in sub_label_new if e.id not in {n.id for n in new_only}]
         if alert_events:

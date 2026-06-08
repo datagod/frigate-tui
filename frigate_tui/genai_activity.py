@@ -74,6 +74,8 @@ def _message_detail_suffix(m: dict[str, Any]) -> str:
         parts.append(f"names={', '.join(str(s) for s in subs)}")
     if m.get("title") and m.get("kind") == "review":
         parts.append(f"title={m['title']}")
+    if m.get("kind") == "object" and (m.get("text") or "").strip():
+        parts.append("has_genai_description=yes")
     threat = m.get("threat")
     if threat is not None and float(threat) > 0:
         parts.append(f"threat={threat}")
