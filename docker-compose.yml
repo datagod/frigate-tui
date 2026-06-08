@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: frigate-tui
-    image: frigate-tui:latest
+    image: frigate-tui:tui
 
     # === Network attachment for easy local use ===
     # By default we attach to a container named "frigate".
@@ -65,7 +65,7 @@ services:
       args:
         # Install the optional web dependencies into the image for this service
         INSTALL_EXTRAS: "[web]"
-    image: frigate-tui:latest
+    image: frigate-tui:web
     container_name: frigate-web
     profiles: ["web"]
 
