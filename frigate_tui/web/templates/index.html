@@ -171,7 +171,8 @@
         <div onclick="switchTab('health')"   id="tab-health"   class="tab">Health / Queues</div>
         <div onclick="switchTab('summary')"  id="tab-summary"  class="tab">Summary</div>
         <div onclick="switchTab('genai-log')" id="tab-genai-log" class="tab">GenAI Log</div>
-        <div onclick="switchTab('recordings')" id="tab-recordings" class="tab">Recordings</div>
+        <div onclick="switchTab('recordings')" id="tab-recordings" class="tab">AudioAlerts</div>
+        <div onclick="switchTab('video-history')" id="tab-video-history" class="tab">Video History</div>
       </div>
 
       <!-- Tab contents -->
@@ -379,6 +380,45 @@
           <audio id="recordings-player" class="hidden" preload="none"></audio>
         </div>
 
+        <!-- Video History: Frigate continuous recordings on disk -->
+        <div id="pane-video-history" class="hidden flex flex-col min-h-0 h-full">
+          <div class="flex flex-wrap items-center gap-2 mb-2 text-xs">
+            <span class="text-[#6b7280]">Frigate recordings in</span>
+            <span id="video-history-dir" class="font-mono text-[#c0c5d1]">—</span>
+            <label class="text-[#6b7280] shrink-0" for="video-history-camera-filter">Camera</label>
+            <select id="video-history-camera-filter"
+              class="min-w-[120px] bg-[#12151c] border border-[#4a5263] rounded px-2 py-1 text-[#c0c5d1]"
+              onchange="loadVideoHistory(true)">
+              <option value="">All cameras</option>
+            </select>
+            <button type="button" onclick="loadVideoHistory(true)"
+              class="px-2 py-1 rounded border border-[#4a5263] text-[#9ca3af] hover:text-white">
+              Refresh
+            </button>
+            <span id="video-history-status" class="text-[#6b7280] ml-1"></span>
+          </div>
+          <p class="text-[10px] text-[#6b7280] mb-2">
+            Browse recorded video files from your Frigate storage folder. Click a row to open the viewer.
+            Mount the recordings directory into the web container (see <span class="font-mono">video_history.recordings_dir</span> in config).
+          </p>
+          <div class="overflow-auto flex-1 max-h-[calc(100vh-260px)]">
+            <table class="data-table w-full text-xs border-collapse" id="video-history-table">
+              <thead>
+                <tr class="text-left text-[#6b7280] border-b border-[#4a5263]">
+                  <th class="w-28 min-w-28">Time</th>
+                  <th class="w-28">Camera</th>
+                  <th class="min-w-[200px]">File</th>
+                  <th class="w-16">Size</th>
+                  <th class="w-24">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="video-history-tbody" class="font-mono text-[11px]">
+                <tr><td colspan="5" class="text-[#6b7280] py-2">Open this tab or click Refresh to load recordings.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
         <!-- GenAI Log: chronological messages, newest first -->
         <div id="pane-genai-log" class="hidden flex flex-col min-h-0 h-full">
           <div class="flex flex-wrap items-center gap-2 mb-2 text-xs">
@@ -470,6 +510,22 @@
     <span class="text-[#6b7280]">Target:</span>
     <span id="conn-url" class="text-cyan-400">{{ snapshot.frigate_url }}</span>
     <span id="conn-status" class="ml-2"></span>
+  </div>
+
+  <!-- Video History viewer modal -->
+  <div id="video-modal" onclick="hideVideoModal()" class="hidden fixed inset-0 z-50 items-center justify-center">
+    <div onclick="event.stopImmediatePropagation()" class="modal w-[min(96vw,960px)] rounded-lg border border-[#4a5263] p-4">
+      <div class="flex justify-between items-center mb-2">
+        <div id="video-modal-title" class="font-semibold text-sm"></div>
+        <button onclick="hideVideoModal()" class="text-[#6b7280] hover:text-white">✕</button>
+      </div>
+      <div id="video-modal-meta" class="text-xs text-[#6b7280] mb-2"></div>
+      <video id="video-modal-player" class="w-full max-h-[min(70vh,560px)] rounded border border-[#4a5263] bg-black" controls preload="metadata"></video>
+      <div class="mt-3 flex flex-wrap items-center gap-3 text-xs">
+        <a id="video-modal-download" href="#" download
+          class="text-[#a5b4fc] hover:text-white underline">Download</a>
+      </div>
+    </div>
   </div>
 
   <!-- Event detail modal -->
@@ -570,6 +626,9 @@
       }
       if (name === 'recordings') {
         loadRecordings(false);
+      }
+      if (name === 'video-history') {
+        loadVideoHistory(false);
       }
       if (name === 'summary') {
         syncSummaryReportLayout();
@@ -2592,6 +2651,140 @@
         setRecordingsPlayState(recordingsPlayingFilename, true);
       }
       updateRecordingsSelectionUi();
+    }
+
+    let videoHistoryListCache = [];
+
+    function videoHistoryUrl(path, download) {
+      const q = download ? '?download=1' : '';
+      return `/api/video-history/${encodeURI(path)}${q}`;
+    }
+
+    function showVideoModal(item) {
+      if (!item || !item.path) return;
+      const modal = document.getElementById('video-modal');
+      const title = document.getElementById('video-modal-title');
+      const meta = document.getElementById('video-modal-meta');
+      const player = document.getElementById('video-modal-player');
+      const download = document.getElementById('video-modal-download');
+      if (!modal || !player) return;
+
+      const when = formatLocalTime(item.modified_at);
+      const cam = item.camera || '—';
+      const file = item.filename || item.path;
+      if (title) title.textContent = `${cam} — ${file}`;
+      if (meta) {
+        meta.textContent = `${when} ${DISPLAY_TZ_LABEL} · ${formatFileSize(item.size_bytes)}`;
+      }
+
+      player.pause();
+      player.removeAttribute('src');
+      player.load();
+      player.src = videoHistoryUrl(item.path, false);
+      player.load();
+
+      if (download) {
+        download.href = videoHistoryUrl(item.path, true);
+        download.setAttribute('download', file);
+      }
+
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+    }
+
+    function hideVideoModal() {
+      const modal = document.getElementById('video-modal');
+      const player = document.getElementById('video-modal-player');
+      if (player) {
+        player.pause();
+        player.removeAttribute('src');
+        player.load();
+      }
+      if (modal) {
+        modal.classList.add('hidden');
+        modal.classList.remove('flex');
+      }
+    }
+
+    function renderVideoHistory(data) {
+      const tbody = document.getElementById('video-history-tbody');
+      const dirEl = document.getElementById('video-history-dir');
+      const camSel = document.getElementById('video-history-camera-filter');
+      if (!tbody) return;
+
+      if (dirEl && data.directory) dirEl.textContent = data.directory;
+
+      const videos = data.videos || [];
+      videoHistoryListCache = videos;
+
+      if (camSel) {
+        const current = camSel.value;
+        const cameras = data.cameras || [];
+        camSel.innerHTML = '<option value="">All cameras</option>';
+        cameras.forEach((cam) => {
+          const opt = document.createElement('option');
+          opt.value = cam;
+          opt.textContent = cam;
+          if (cam === current) opt.selected = true;
+          camSel.appendChild(opt);
+        });
+      }
+
+      if (!videos.length) {
+        const hint = !data.exists
+          ? 'Recordings directory not found. Mount your Frigate recordings folder and set video_history.recordings_dir in config.yaml.'
+          : 'No video files found in the recordings directory.';
+        tbody.innerHTML = `<tr><td colspan="5" class="text-[#6b7280] py-2">${escapeHtml(hint)}</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = videos.map((v) => {
+        const when = formatLocalTime(v.modified_at);
+        const cam = escapeHtml(v.camera || '—');
+        const file = escapeHtml(v.filename || v.path || '');
+        const path = v.path || '';
+        const pathAttr = escapeHtml(path);
+        const size = formatFileSize(v.size_bytes);
+        const dlBtn = `<a href="${videoHistoryUrl(path, true)}" download="${file}"
+          onclick="event.stopPropagation()"
+          class="text-[#9ca3af] hover:text-white">Download</a>`;
+        return `<tr class="border-b border-[#272e3b] cursor-pointer hover:bg-[#1a2030]"
+          data-video-path="${pathAttr}" onclick="openVideoHistoryRow(this.dataset.videoPath)">
+          <td class="text-[#6b7280] whitespace-nowrap">${when}</td>
+          <td class="text-[#a5b4fc]">${cam}</td>
+          <td class="text-[#e5e7eb]">${file}</td>
+          <td class="text-[#6b7280]">${size}</td>
+          <td>${dlBtn}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    function openVideoHistoryRow(path) {
+      const item = videoHistoryListCache.find((v) => v.path === path);
+      if (item) showVideoModal(item);
+    }
+
+    async function loadVideoHistory(force) {
+      const status = document.getElementById('video-history-status');
+      const camSel = document.getElementById('video-history-camera-filter');
+      if (status && (force || !status.textContent)) status.textContent = 'Loading…';
+      const camera = camSel ? camSel.value : '';
+      const qs = camera ? `?camera=${encodeURIComponent(camera)}` : '';
+      try {
+        const r = await fetch(`/api/video-history${qs}`);
+        const data = await r.json();
+        if (!r.ok || !data.ok) {
+          throw new Error((data && data.error) || `HTTP ${r.status}`);
+        }
+        renderVideoHistory(data);
+        if (status) {
+          const suffix = data.truncated ? ' (truncated)' : '';
+          status.textContent = `${data.total || 0} file(s)${suffix}`;
+        }
+      } catch (e) {
+        if (status) status.textContent = `Failed: ${e.message || e}`;
+        renderVideoHistory({ videos: [], exists: false, cameras: [] });
+      }
     }
 
     async function loadRecordings(force) {

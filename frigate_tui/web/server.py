@@ -17,7 +17,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.templating import Jinja2Templates
-from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from starlette.staticfiles import StaticFiles
 
 from frigate_tui.chatterbox_tts import (
@@ -36,6 +36,13 @@ from frigate_tui.tts_recording_cache import (
     recording_file_path,
     resolve_recordings_dir,
     safe_recording_filename,
+)
+from frigate_tui.video_history import (
+    list_videos,
+    media_type_for_video,
+    resolve_video_history_dir,
+    safe_relative_path,
+    video_file_path,
 )
 from frigate_tui.web.sounds_util import list_sound_files, sounds_directory
 
@@ -202,6 +209,66 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
 
     def _recordings_cache_dir() -> str:
         return str(core.chatterbox_tts_config.get("cache_dir") or "localrecordings")
+
+    def _video_history_settings() -> dict[str, Any]:
+        return dict(core.video_history_config or {})
+
+    @app.get("/api/video-history")
+    async def api_video_history(camera: str | None = None):
+        """List recorded camera video files from the Frigate recordings directory."""
+        cfg = _video_history_settings()
+        if not cfg.get("enabled"):
+            return JSONResponse(
+                {"ok": False, "error": "Video History is disabled in config."},
+                status_code=503,
+            )
+        recordings_dir = str(cfg.get("recordings_dir") or "/media/frigate/recordings")
+        max_files = int(cfg.get("max_files") or 500)
+        videos, status = list_videos(
+            recordings_dir,
+            max_files=max_files,
+            camera=camera,
+        )
+        cameras = sorted({str(v.get("camera") or "") for v in videos if v.get("camera")})
+        return JSONResponse(
+            {
+                "ok": True,
+                "directory": status.get("directory"),
+                "exists": status.get("exists", False),
+                "total": status.get("total", len(videos)),
+                "truncated": bool(status.get("truncated")),
+                "cameras": cameras,
+                "videos": videos,
+                "error": status.get("error"),
+            }
+        )
+
+    @app.get("/api/video-history/{file_path:path}")
+    async def api_video_history_file(file_path: str, download: bool = False):
+        """Stream a recorded video for inline playback or download."""
+        cfg = _video_history_settings()
+        if not cfg.get("enabled"):
+            return JSONResponse(
+                {"ok": False, "error": "Video History is disabled in config."},
+                status_code=503,
+            )
+        safe = safe_relative_path(file_path)
+        if not safe:
+            return JSONResponse({"ok": False, "error": "invalid path"}, status_code=400)
+        recordings_dir = str(cfg.get("recordings_dir") or "/media/frigate/recordings")
+        path = video_file_path(safe, recordings_dir=recordings_dir)
+        if path is None or not path.is_file() or path.stat().st_size <= 0:
+            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        disposition = "attachment" if download else "inline"
+        headers = {
+            "Content-Disposition": f'{disposition}; filename="{path.name}"',
+            "Cache-Control": "public, max-age=3600",
+        }
+        return FileResponse(
+            path,
+            media_type=media_type_for_video(path.name),
+            headers=headers,
+        )
 
     @app.get("/api/recordings")
     async def api_recordings():

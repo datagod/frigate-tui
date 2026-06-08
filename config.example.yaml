@@ -67,6 +67,13 @@ chatterbox_tts:
   event_template: "{label} on {camera}"
   default_test_message: "Person detected on driveway."
 
+# Video History tab (web): browse Frigate continuous recordings on disk
+# Mount your Frigate recordings directory into the web container (see docker-compose.yml).
+video_history:
+  enabled: true
+  recordings_dir: /media/frigate/recordings   # Frigate default inside its container
+  max_files: 500                              # newest files shown when directory is large
+
 # Web UI alert sounds (browser only; queued playback). Place MP3/WAV files in ./sounds/
 web_alerts:
   enabled: true
