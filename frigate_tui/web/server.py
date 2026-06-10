@@ -20,8 +20,11 @@ from fastapi.templating import Jinja2Templates
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from starlette.staticfiles import StaticFiles
 
+from frigate_tui import __version__
+from frigate_tui.chatterbox_models import CHATTERBOX_TTS_MODELS, normalize_tts_model
 from frigate_tui.chatterbox_tts import (
     apply_delivery_mode_settings,
+    apply_tts_model_settings,
     apply_voice_override,
     get_or_synthesize_speech,
     list_chatterbox_voices,
@@ -184,7 +187,7 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
     app = FastAPI(
         title="Frigate TUI Web",
         description="Local-network web dashboard with full feature parity to the Frigate TUI.",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
     )
 
@@ -531,6 +534,79 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
             }
         )
 
+    @app.get("/api/tts/models")
+    async def api_tts_models():
+        """List Chatterbox engine models and report the active server model."""
+        cfg = core.chatterbox_tts_config
+        if not cfg.get("enabled"):
+            return JSONResponse(
+                {"ok": False, "error": "Chatterbox TTS is disabled in config."},
+                status_code=503,
+            )
+        try:
+            state = await core.fetch_chatterbox_model_state()
+            current = normalize_tts_model(state.get("repo_id"))
+            saved = core.get_event_tts_model()
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "models": state.get("models") or list(CHATTERBOX_TTS_MODELS),
+                    "current": current,
+                    "chosen": saved,
+                    "info": state.get("info") or {},
+                }
+            )
+        except Exception as e:
+            return JSONResponse(
+                {"ok": False, "error": f"{type(e).__name__}: {e}"},
+                status_code=502,
+            )
+
+    @app.post("/api/tts/model")
+    async def api_tts_model_set(request: Request):
+        """Hot-swap the Chatterbox engine model on the TTS server."""
+        cfg = core.chatterbox_tts_config
+        if not cfg.get("enabled"):
+            return JSONResponse(
+                {"ok": False, "error": "Chatterbox TTS is disabled in config."},
+                status_code=503,
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        repo_id = normalize_tts_model(body.get("repo_id") or body.get("tts_model"))
+        try:
+            result = await core.apply_chatterbox_model(repo_id)
+            state = await core.fetch_chatterbox_model_state()
+            current = normalize_tts_model(state.get("repo_id"))
+            core.add_log(f"Chatterbox TTS model set to {current}", "info")
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "repo_id": current,
+                    "chosen": core.get_event_tts_model(),
+                    "restart": result.get("restart"),
+                    "info": state.get("info") or {},
+                }
+            )
+        except TimeoutError as e:
+            core.add_log(f"Chatterbox model switch failed: {e}", "error")
+            return JSONResponse({"ok": False, "error": str(e), "logged": True}, status_code=504)
+        except ConnectionError as e:
+            core.add_log(f"Chatterbox model switch failed: {e}", "error")
+            return JSONResponse({"ok": False, "error": str(e), "logged": True}, status_code=502)
+        except RuntimeError as e:
+            core.add_log(f"Chatterbox model switch failed: {e}", "error")
+            return JSONResponse({"ok": False, "error": str(e), "logged": True}, status_code=502)
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+            core.add_log(f"Chatterbox model switch failed: {err}", "error")
+            return JSONResponse(
+                {"ok": False, "error": err, "logged": True},
+                status_code=500,
+            )
+
     @app.get("/api/tts/voices")
     async def api_tts_voices():
         """List Chatterbox clone and predefined voices for the test UI."""
@@ -542,6 +618,10 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
             )
         try:
             voices = await list_chatterbox_voices(cfg)
+            model_state = await core.fetch_chatterbox_model_state()
+            current_model = normalize_tts_model(model_state.get("repo_id"))
+            if core.get_event_tts_model() != current_model:
+                core.set_event_tts_model(current_model)
             default_mode = cfg.get("voice_mode", "clone")
             default_voice = (
                 cfg.get("reference_audio_filename")
@@ -555,6 +635,9 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
                     "default": {"voice_mode": default_mode, "voice": default_voice},
                     "chosen": core.get_event_tts_voice(),
                     "delivery_mode": core.get_event_tts_delivery_mode(),
+                    "tts_model": current_model,
+                    "models": model_state.get("models") or list(CHATTERBOX_TTS_MODELS),
+                    "model_info": model_state.get("info") or {},
                 }
             )
         except Exception as e:
@@ -585,17 +668,21 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
         delivery_mode = normalize_delivery_mode(
             body.get("delivery_mode") or core.get_event_tts_delivery_mode()
         )
-        spoken_text = apply_delivery_mode(text, delivery_mode)
+        tts_model = core.get_event_tts_model()
+        spoken_text = apply_delivery_mode(text, delivery_mode, tts_model=tts_model)
         body_mode = str(body.get("voice_mode") or "").strip()
         body_voice = str(body.get("voice") or "").strip()
         if body_mode and body_voice:
-            speak_cfg = apply_delivery_mode_settings(
-                apply_voice_override(
-                    cfg,
-                    voice_mode=body_mode,
-                    voice=body_voice,
+            speak_cfg = apply_tts_model_settings(
+                apply_delivery_mode_settings(
+                    apply_voice_override(
+                        cfg,
+                        voice_mode=body_mode,
+                        voice=body_voice,
+                    ),
+                    delivery_mode,
                 ),
-                delivery_mode,
+                core.get_event_tts_model(),
             )
         else:
             speak_cfg = core.get_event_tts_settings()

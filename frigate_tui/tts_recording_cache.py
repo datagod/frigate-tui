@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from frigate_tui.chatterbox_models import normalize_tts_model
 from frigate_tui.delivery_modes import normalize_delivery_mode
 from frigate_tui.models import normalize_sub_label
 
@@ -28,7 +29,7 @@ def event_voice_pref_path(cache_dir: str) -> Path:
 
 
 def load_event_tts_prefs(cache_dir: str) -> dict[str, str]:
-    """Return saved UI TTS prefs: voice_mode, voice, delivery_mode."""
+    """Return saved UI TTS prefs: voice_mode, voice, delivery_mode, tts_model."""
     path = event_voice_pref_path(cache_dir)
     prefs: dict[str, str] = {"delivery_mode": "normal"}
     if not path.is_file():
@@ -45,6 +46,9 @@ def load_event_tts_prefs(cache_dir: str) -> dict[str, str]:
         prefs["voice_mode"] = mode
         prefs["voice"] = voice
     prefs["delivery_mode"] = normalize_delivery_mode(data.get("delivery_mode"))
+    model = str(data.get("tts_model") or "").strip()
+    if model:
+        prefs["tts_model"] = normalize_tts_model(model)
     return prefs
 
 
@@ -64,6 +68,7 @@ def save_event_tts_prefs(
     voice_mode: str | None = None,
     voice: str | None = None,
     delivery_mode: str | None = None,
+    tts_model: str | None = None,
 ) -> None:
     """Persist UI TTS prefs for event alerts and manual Speak tests."""
     path = event_voice_pref_path(cache_dir)
@@ -73,21 +78,15 @@ def save_event_tts_prefs(
     delivery = normalize_delivery_mode(
         delivery_mode if delivery_mode is not None else existing.get("delivery_mode")
     )
+    model = normalize_tts_model(
+        tts_model if tts_model is not None else existing.get("tts_model")
+    )
+    payload: dict[str, str] = {"delivery_mode": delivery, "tts_model": model}
     if mode in ("clone", "predefined") and name:
-        path.write_text(
-            json.dumps(
-                {"voice_mode": mode, "voice": name, "delivery_mode": delivery},
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        return
-    if delivery != "normal":
-        path.write_text(
-            json.dumps({"delivery_mode": delivery}, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        payload["voice_mode"] = mode
+        payload["voice"] = name
+    if payload.get("voice_mode") or delivery != "normal" or model != "chatterbox-turbo":
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         return
     if path.is_file():
         try:
@@ -135,11 +134,14 @@ def recording_filename(text: str, *, settings: dict[str, Any]) -> str:
 
     voice_slug = _slug_part(Path(voice_key_from_settings(settings)).stem, max_len=48)
     mode_slug = _slug_part(normalize_delivery_mode(settings.get("delivery_mode")), max_len=16)
+    model_slug = _slug_part(normalize_tts_model(settings.get("tts_model")), max_len=24)
     parts = [message_slug]
     if voice_slug:
         parts.append(voice_slug)
     if mode_slug and mode_slug != "normal":
         parts.append(mode_slug)
+    if model_slug and model_slug != "chatterbox_turbo":
+        parts.append(model_slug)
     base = "__".join(parts)
 
     return f"{base}.{output_format}"

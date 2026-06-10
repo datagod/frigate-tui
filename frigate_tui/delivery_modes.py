@@ -5,6 +5,8 @@ from __future__ import annotations
 import random
 from typing import Any
 
+from frigate_tui.chatterbox_models import normalize_tts_model
+
 DELIVERY_MODES: tuple[str, ...] = ("normal", "conspiracy", "panicky", "neurotic", "playful")
 
 _DELIVERY_MODE_LABELS = {
@@ -502,21 +504,289 @@ def pick_neurotic_phrase() -> str:
     return random.choice(NEUROTIC_PHRASES)
 
 
+# Chatterbox-Turbo paralinguistic tags (only when tts_model is chatterbox-turbo).
+_NEUROTIC_TURBO_TAGS: tuple[str, ...] = (
+    "[laugh]",
+    "[chuckle]",
+    "[gasp]",
+    "[cough]",
+    "[sigh]",
+    "[groan]",
+    "[sniff]",
+    "[shush]",
+    "[clear throat]",
+)
+_NEUROTIC_TAG_CHANCE = 0.38
+_NEUROTIC_TAG_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("[gasp]", (
+        "oh dear", "lookout", "oh no", "yikes", "uh-oh", "red flag", "what was that",
+        "stomach dropped", "gave me chills", "my goodness", "sir!", "linen alert",
+        "sock anomaly", "sheet horror", "dread detected", "wrinkle emergency",
+        "panic protocol", "mechanoid panic", "fold crisis", "servos shaking",
+        "major red flag", "that doesn't look good", "this can't be good",
+    )),
+    ("[sigh]", (
+        "need a minute", "sit down", "peace is gone", "calm evening", "begging this",
+        "therapist warned", "deep breaths", "process what this means", "obsess over tonight",
+        "downstream effects", "spin cycle of dread", "composure", "misplaced my calm",
+        "going to need tea", "need a moment", "how long am i going to think",
+    )),
+    ("[groan]", (
+        "not again", "here we go again", "too much", "why did i look", "regretting",
+        "spiraling", "ruined my", "villain origin", "too delicate", "cannot bear",
+        "over-folded", "last thing i needed", "none of them end well", "bleach blues",
+        "dryer doom", "tumble terror", "rinse dread",
+    )),
+    ("[chuckle]", (
+        "paranoid", "pearls", "rogue sock", "sheets are watching", "inside-out and so am i",
+        "tiny breakdown", "darks of despair", "permission to have a small breakdown",
+        "chaos not tidy", "catastrophised", "lint tray is full", "fitted sheet fail",
+        "call me paranoid", "side-eyeing", "villain origin",
+    )),
+    ("[laugh]", (
+        "rogue sock", "sheets are watching", "villain origin", "catastrophised the entire linen",
+    )),
+    ("[cough]", (
+        "terribly sorry", "apologise", "apologies, sir", "i do apologise", "terribly afraid",
+    )),
+    ("[sniff]", (
+        "felt that in my chest", "bleach", "fabric softener", "laundry chute", "starch",
+        "smells like", "lint-level", "fluff fear",
+    )),
+    ("[shush]", (
+        "stay frosty", "don't look away", "eyes everywhere", "should i hide",
+    )),
+    ("[clear throat]", (
+        "regulation seven", "sir, the ship", "sir, permission", "folding protocol",
+        "most irregular", "this is not on the approved", "sir, the crease", "sir, i've misplaced",
+        "sir, the laundry", "sir, i'm experiencing",
+    )),
+)
+_NEUROTIC_TAG_SKIP_SUBSTRINGS = (
+    "deep breaths. deep breaths.",
+    "should we be worried?",
+    "who authorized this?",
+    "where's the dog?",
+    "did we leave a window open?",
+    "who do we call first?",
+    "shall i continue folding through the crisis?",
+)
+
+
+def _turbo_tags_enabled(tts_model: str | None) -> bool:
+    return normalize_tts_model(tts_model) == "chatterbox-turbo"
+
+
+def _neurotic_tag_candidates(phrase: str) -> list[str]:
+    """Return paralinguistic tags that fit this neurotic line."""
+    text = phrase.strip().lower()
+    if not text or text.endswith("?"):
+        return []
+    if any(skip in text for skip in _NEUROTIC_TAG_SKIP_SUBSTRINGS):
+        return []
+    if text.endswith(".") and len(text) < 28 and "sir" not in text and "!" not in phrase:
+        return []
+
+    candidates: list[str] = []
+    for tag, needles in _NEUROTIC_TAG_RULES:
+        if any(needle in text for needle in needles):
+            candidates.append(tag)
+    return candidates
+
+
+def _delivery_tag_rng(base_text: str, phrase: str, delivery: str) -> random.Random:
+    """Stable per alert line so cached recordings stay consistent."""
+    seed = hash((delivery, base_text, phrase)) & 0xFFFFFFFF
+    return random.Random(seed)
+
+
+def _insert_paralinguistic_tag(phrase: str, tag: str, placement: str) -> str:
+    if placement == "prefix":
+        return f"{tag} {phrase}"
+    if placement == "suffix":
+        return f"{phrase} {tag}"
+    for sep in (", ", " — ", "! ", "? "):
+        if sep in phrase:
+            idx = phrase.index(sep) + len(sep)
+            return f"{phrase[:idx]}{tag} {phrase[idx:]}"
+    if len(phrase) > 42:
+        mid = len(phrase) // 2
+        split_at = phrase.find(" ", mid)
+        if split_at > 0:
+            return f"{phrase[:split_at]} {tag}{phrase[split_at:]}"
+    return f"{tag} {phrase}"
+
+
+_CONSPIRACY_TAG_CHANCE = 0.40
+_CONSPIRACY_TAG_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("[gasp]", (
+        "unbelievable", "outrageous", "horrifying", "terrifying", "appalling", "infuriating",
+        "treasonous", "insane", "ridiculous",
+        "red pill", "smoking gun", "hate that you noticed", "look what they're hiding",
+        "narrative collapse", "digital gulag", "panopticon", "they're watching",
+        "not report this", "truth is under attack", "script flipped", "too convenient",
+        "deep state", "coming for your guns", "surveillance grid", "surveillance test",
+        "chemtrail fallout", "5g activation", "geoengineering fallout",
+        "trap sprung", "algorithm sent", "matrix has you", "all connected",
+        "timing is everything", "gladio style", "social credit",
+    )),
+    ("[groan]", (
+        "pathetic", "disgusting", "revolting", "despicable", "shameful", "monstrous",
+        "sickening", "corrupt", "fraudulent", "compromised", "scripted",
+        "legacy media silent", "fact checkers hate", "fear porn", "divide and conquer",
+        "compliance is not patriotism", "bread and circuses failed", "big pharma hates",
+        "synthetic teleprompter", "crisis capitalism", "manufactured consent",
+        "unacceptable", "scandalous", "diabolical", "evil", "criminal",
+        "treasonous", "insane", "ridiculous",
+    )),
+    ("[sigh]", (
+        "wake up", "stay vigilant", "quiet war continues", "bank on your apathy",
+        "prison planet", "stack silver", "patriot radio was right", "question everything on tv",
+        "another dot on the board", "this is the distraction", "great reset continues",
+        "technocracy rising", "order out of chaos",
+        "matrix has you", "timing is everything", "deep state knows", "social credit",
+    )),
+    ("[chuckle]", (
+        "just asking questions", "crisis actors", "klaus schwab smiles", "eat the bugs",
+        "turned the frogs gay", "interdimensional chaos agents", "own nothing and be happy",
+        "coincidence? i think not", "hegelian dialectic", "problem, reaction, solution",
+        "bohemian grove", "bilderberg approved", "skull and bones nod", "neural link beta",
+        "fifteen minute cities", "globalist puppets", "central bank puppet show",
+        "think tank script", "luciferian ritual", "fluoride mind control", "frogs warned us",
+    )),
+    ("[laugh]", (
+        "turned the frogs gay", "interdimensional chaos agents", "eat the bugs? never",
+        "klaus schwab smiles", "frogs warned us",
+    )),
+    ("[cough]", (
+        "info wars", "mainstream media will not report", "deep state is making its move",
+        "operation mockingbird", "world economic forum approved", "fluoride in the water",
+        "un agenda twenty thirty", "bilderberg group planned", "globalist puppet masters",
+        "predictive programming", "media blackout incoming",
+    )),
+    ("[clear throat]", (
+        "wake up", "info wars was right", "resistance is mandatory", "connect the dots",
+        "follow the money", "classic playbook", "eyes up, sheep down", "stay vigilant, stay free",
+        "follow the patents", "defense contractor dividend", "ngo money trail",
+    )),
+    ("[shush]", (
+        "they don't want you to know", "quiet part said loud", "look what they're hiding",
+        "black budget", "shadow banned", "scriptwriters are nervous", "they fear an awake population",
+        "deep state knows", "camera is their weapon",
+    )),
+)
+_CONSPIRACY_TAG_SKIP_SUBSTRINGS: tuple[str, ...] = (
+    "who benefits?",
+)
+
+
+def _conspiracy_tag_candidates(phrase: str) -> list[str]:
+    """Return paralinguistic tags that fit this conspiracy line."""
+    text = phrase.strip().lower()
+    if not text or text.endswith("?"):
+        return []
+    if any(skip in text for skip in _CONSPIRACY_TAG_SKIP_SUBSTRINGS):
+        return []
+
+    candidates: list[str] = []
+    for tag, needles in _CONSPIRACY_TAG_RULES:
+        if any(needle in text for needle in needles):
+            candidates.append(tag)
+    return candidates
+
+
+def _placement_for_conspiracy_tag(tag: str, phrase: str, rng: random.Random) -> str:
+    if tag in ("[gasp]", "[cough]", "[clear throat]"):
+        return "prefix"
+    if tag == "[shush]":
+        return "prefix" if rng.random() < 0.7 else "mid"
+    if tag in ("[groan]", "[sigh]", "[sniff]"):
+        return "suffix"
+    if tag == "[chuckle]":
+        return "mid" if "?" in phrase and len(phrase) > 28 else "suffix"
+    if tag == "[laugh]":
+        return "suffix"
+    return "prefix"
+
+
+def maybe_decorate_conspiracy_phrase(
+    phrase: str,
+    *,
+    base_text: str = "",
+    tts_model: str | None = None,
+) -> str:
+    """Maybe prepend/append a Turbo paralinguistic tag on a conspiracy follow-up."""
+    if not _turbo_tags_enabled(tts_model):
+        return phrase
+    candidates = _conspiracy_tag_candidates(phrase)
+    if not candidates:
+        return phrase
+
+    rng = _delivery_tag_rng(base_text, phrase, "conspiracy")
+    if rng.random() > _CONSPIRACY_TAG_CHANCE:
+        return phrase
+
+    tag = rng.choice(candidates)
+    placement = _placement_for_conspiracy_tag(tag, phrase, rng)
+    return _insert_paralinguistic_tag(phrase, tag, placement)
+
+
+def _placement_for_neurotic_tag(tag: str, phrase: str, rng: random.Random) -> str:
+    if tag in ("[gasp]", "[cough]", "[clear throat]", "[shush]"):
+        return "prefix"
+    if tag in ("[sigh]", "[groan]", "[sniff]", "[laugh]"):
+        return "suffix"
+    if tag == "[chuckle]":
+        return "mid" if len(phrase) > 36 and rng.random() < 0.55 else "suffix"
+    return "prefix"
+
+
+def maybe_decorate_neurotic_phrase(
+    phrase: str,
+    *,
+    base_text: str = "",
+    tts_model: str | None = None,
+) -> str:
+    """Maybe prepend/append a Turbo paralinguistic tag on a neurotic follow-up."""
+    if not _turbo_tags_enabled(tts_model):
+        return phrase
+    candidates = _neurotic_tag_candidates(phrase)
+    if not candidates:
+        return phrase
+
+    rng = _delivery_tag_rng(base_text, phrase, "neurotic")
+    if rng.random() > _NEUROTIC_TAG_CHANCE:
+        return phrase
+
+    tag = rng.choice(candidates)
+    placement = _placement_for_neurotic_tag(tag, phrase, rng)
+    return _insert_paralinguistic_tag(phrase, tag, placement)
+
+
 def pick_playful_phrase() -> str:
     """Pick a random phrase from the playful pool."""
     return random.choice(PLAYFUL_PHRASES)
 
 
-def apply_delivery_mode(text: str, mode: str) -> str:
+def apply_delivery_mode(
+    text: str,
+    mode: str,
+    *,
+    tts_model: str | None = None,
+) -> str:
     """Rewrite alert text for conspiracy, panicky, neurotic, or playful delivery styles."""
     base = (text or "").strip()
     if not base:
         return base
     delivery = normalize_delivery_mode(mode)
     if delivery == "conspiracy":
-        return f"{base}. {pick_conspiracy_phrase()}"
+        phrase = pick_conspiracy_phrase()
+        phrase = maybe_decorate_conspiracy_phrase(phrase, base_text=base, tts_model=tts_model)
+        return f"{base}. {phrase}"
     if delivery == "neurotic":
-        return f"{base}. {pick_neurotic_phrase()}"
+        phrase = pick_neurotic_phrase()
+        phrase = maybe_decorate_neurotic_phrase(phrase, base_text=base, tts_model=tts_model)
+        return f"{base}. {phrase}"
     if delivery == "playful":
         return f"{base}. {pick_playful_phrase()}"
     if delivery == "panicky":

@@ -19,10 +19,14 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Awaitable
 
 from frigate_tui import __version__
+from frigate_tui.chatterbox_models import normalize_tts_model
 from frigate_tui.chatterbox_tts import (
     apply_delivery_mode_settings,
+    apply_tts_model_settings,
     apply_voice_override,
     chatterbox_settings_from_config,
+    get_chatterbox_model_info,
+    set_chatterbox_model,
 )
 from frigate_tui.delivery_modes import DELIVERY_MODES, normalize_delivery_mode
 from frigate_tui.tts_recording_cache import (
@@ -150,6 +154,7 @@ class FrigateMonitorCore:
         self._event_tts_delivery_mode: str = normalize_delivery_mode(
             saved_prefs.get("delivery_mode")
         )
+        self._event_tts_model: str = normalize_tts_model(saved_prefs.get("tts_model"))
         self._genai_activity_hours_keep: float = float(
             s.get("genai_activity_hours_keep", 48.0)
         )
@@ -401,6 +406,7 @@ class FrigateMonitorCore:
                 "chosen_voice": self.get_event_tts_voice(),
                 "delivery_mode": self.get_event_tts_delivery_mode(),
                 "delivery_modes": list(DELIVERY_MODES),
+                "tts_model": self.get_event_tts_model(),
             },
         }
 
@@ -431,6 +437,7 @@ class FrigateMonitorCore:
             voice_mode=self._event_tts_voice_mode,
             voice=self._event_tts_voice,
             delivery_mode=self._event_tts_delivery_mode,
+            tts_model=self._event_tts_model,
         )
         return self.get_event_tts_voice()
 
@@ -445,11 +452,37 @@ class FrigateMonitorCore:
             voice_mode=self._event_tts_voice_mode,
             voice=self._event_tts_voice,
             delivery_mode=self._event_tts_delivery_mode,
+            tts_model=self._event_tts_model,
         )
         return self.get_event_tts_delivery_mode()
 
+    def get_event_tts_model(self) -> str:
+        return normalize_tts_model(self._event_tts_model)
+
+    def set_event_tts_model(self, tts_model: str | None) -> str:
+        """Save the UI-chosen Chatterbox engine model."""
+        self._event_tts_model = normalize_tts_model(tts_model)
+        save_event_tts_prefs(
+            self.chatterbox_tts_config.get("cache_dir", "localrecordings"),
+            voice_mode=self._event_tts_voice_mode,
+            voice=self._event_tts_voice,
+            delivery_mode=self._event_tts_delivery_mode,
+            tts_model=self._event_tts_model,
+        )
+        return self.get_event_tts_model()
+
+    async def fetch_chatterbox_model_state(self) -> dict[str, Any]:
+        """Return catalog + active model from the Chatterbox TTS Server."""
+        return await get_chatterbox_model_info(self.chatterbox_tts_config)
+
+    async def apply_chatterbox_model(self, repo_id: str) -> dict[str, Any]:
+        """Hot-swap the Chatterbox engine and persist the UI choice."""
+        result = await set_chatterbox_model(self.chatterbox_tts_config, repo_id)
+        self.set_event_tts_model(result.get("repo_id"))
+        return result
+
     def get_event_tts_settings(self) -> dict[str, Any]:
-        """Chatterbox settings with UI-chosen voice and delivery mode applied."""
+        """Chatterbox settings with UI-chosen voice, model, and delivery mode applied."""
         chosen = self.get_event_tts_voice()
         if chosen:
             settings = apply_voice_override(
@@ -459,10 +492,11 @@ class FrigateMonitorCore:
             )
         else:
             settings = dict(self.chatterbox_tts_config)
-        return apply_delivery_mode_settings(
+        settings = apply_delivery_mode_settings(
             settings,
             self.get_event_tts_delivery_mode(),
         )
+        return apply_tts_model_settings(settings, self.get_event_tts_model())
 
     # ------------------------------------------------------------------
     # Lifecycle

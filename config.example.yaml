@@ -44,9 +44,9 @@ genai_report:
 
 genai_health_interval: 30          # seconds between automatic GenAI health probes
 
-# Web Summary tab: Frigate native review summarize report (POST /api/review/summarize)
+# Web Summary tab: default auto-refresh interval (browser UI can override via Auto toggle + Every)
 frigate_report:
-  auto_interval: 600               # seconds between auto-refresh in browser (0 = disabled)
+  auto_interval: 600               # seconds; 0 = auto off by default until enabled in Summary tab
   save_dir: reports              # Frigate_GenAI_Report_YYYYMMDD_HHMMSS.txt files
 
 # Chatterbox TTS Server — voice picker on Overview tab (clone voice from reference_audio/)

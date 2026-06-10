@@ -7,6 +7,11 @@ from typing import Any
 
 import httpx
 
+from frigate_tui.chatterbox_models import (
+    CHATTERBOX_TTS_MODELS,
+    model_repo_id_from_info,
+    normalize_tts_model,
+)
 from frigate_tui.delivery_modes import apply_delivery_mode, normalize_delivery_mode
 from frigate_tui.tts_recording_cache import (
     load_cached_recording,
@@ -20,7 +25,6 @@ _MEDIA_TYPES = {
     "mp3": "audio/mpeg",
     "opus": "audio/opus",
 }
-
 
 def chatterbox_settings_from_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     """Normalize chatterbox_tts config with defaults."""
@@ -88,6 +92,83 @@ def apply_delivery_mode_settings(
     merged = dict(settings)
     merged["delivery_mode"] = normalize_delivery_mode(mode or merged.get("delivery_mode"))
     return merged
+
+
+def apply_tts_model_settings(
+    settings: dict[str, Any],
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Return settings copy tagged with tts_model (for cache keys only)."""
+    merged = dict(settings)
+    merged["tts_model"] = normalize_tts_model(model or merged.get("tts_model"))
+    return merged
+
+
+async def get_chatterbox_model_info(settings: dict[str, Any]) -> dict[str, Any]:
+    """Fetch the active Chatterbox model from GET /api/model-info."""
+    base_url = settings["base_url"]
+    timeout = httpx.Timeout(min(15.0, float(settings.get("timeout", 60))))
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        try:
+            resp = await client.get(f"{base_url}/api/model-info")
+        except httpx.RequestError as e:
+            raise ConnectionError(f"Cannot reach Chatterbox at {base_url}: {e}") from e
+    if resp.status_code >= 400:
+        detail = resp.text.strip()[:300] or resp.reason_phrase
+        raise RuntimeError(f"Chatterbox model info HTTP {resp.status_code}: {detail}")
+    data = resp.json()
+    if not isinstance(data, dict):
+        raise RuntimeError("Chatterbox model info returned unexpected payload.")
+    repo_id = model_repo_id_from_info(data)
+    return {
+        "repo_id": repo_id,
+        "info": data,
+        "models": list(CHATTERBOX_TTS_MODELS),
+    }
+
+
+async def set_chatterbox_model(settings: dict[str, Any], repo_id: str) -> dict[str, Any]:
+    """Hot-swap the Chatterbox engine model via /save_settings + /restart_server."""
+    model_id = normalize_tts_model(repo_id)
+    base_url = settings["base_url"]
+    timeout = httpx.Timeout(max(120.0, float(settings.get("timeout", 60))))
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        try:
+            save_resp = await client.post(
+                f"{base_url}/save_settings",
+                json={"model": {"repo_id": model_id}},
+            )
+        except httpx.TimeoutException as e:
+            raise TimeoutError(
+                f"Chatterbox model save timed out after {settings['timeout']}s"
+            ) from e
+        except httpx.RequestError as e:
+            raise ConnectionError(f"Cannot reach Chatterbox at {base_url}: {e}") from e
+
+        if save_resp.status_code >= 400:
+            detail = save_resp.text.strip()[:300] or save_resp.reason_phrase
+            raise RuntimeError(f"Chatterbox save_settings HTTP {save_resp.status_code}: {detail}")
+
+        try:
+            restart_resp = await client.post(f"{base_url}/restart_server")
+        except httpx.TimeoutException as e:
+            raise TimeoutError("Chatterbox model reload timed out") from e
+        except httpx.RequestError as e:
+            raise ConnectionError(f"Cannot reach Chatterbox at {base_url}: {e}") from e
+
+        if restart_resp.status_code >= 400:
+            detail = restart_resp.text.strip()[:300] or restart_resp.reason_phrase
+            raise RuntimeError(
+                f"Chatterbox restart_server HTTP {restart_resp.status_code}: {detail}"
+            )
+
+        try:
+            result = restart_resp.json()
+        except Exception:
+            result = {"message": restart_resp.text.strip()[:300]}
+        if not isinstance(result, dict):
+            result = {"message": str(result)}
+    return {"repo_id": model_id, "restart": result}
 
 
 async def list_chatterbox_voices(settings: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
@@ -216,7 +297,11 @@ async def warm_event_tts_recordings(core: Any, items: list[dict[str, Any]]) -> N
         base_text = str((item or {}).get("tts_text") or "").strip()
         if not base_text:
             continue
-        text = apply_delivery_mode(base_text, delivery_mode)
+        text = apply_delivery_mode(
+            base_text,
+            delivery_mode,
+            tts_model=cfg.get("tts_model"),
+        )
         try:
             _audio, _mt, from_cache, saved_path = await get_or_synthesize_speech(
                 text, settings=cfg

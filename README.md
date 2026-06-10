@@ -22,7 +22,7 @@ Watch camera FPS, detector queues / pressure, GPU usage, incoming events, and sy
 - **GenAI / LLM integration** (Frigate 0.17+): object descriptions and review summaries in the Activity Log; web **Summary** tab (hourly LLM narrative + Frigate native review report); **GenAI Log** tab (raw messages); Events table **AI Description** column with full text in the event modal
 - **Local timezone display** — all timestamps shown in your configured zone (default `America/New_York` / EDT)
 - **GenAI health probes** on the web **Health / Queues** tab (LLM reachability, model listing, Frigate GenAI config)
-- **Chatterbox TTS** (web): cloned-voice speech for manual tests and optional **event alerts**; recordings cached under `localrecordings/`
+- **Chatterbox TTS** (web): cloned-voice speech for manual tests and optional **event alerts**; hot-swappable **TTS model** (Turbo / Original / Multilingual); **delivery modes** (Normal, Conspiracy, Panicky, Neurotic, Playful); Turbo **paralinguistic tags** (`[laugh]`, `[gasp]`, `[sigh]`, …) on Neurotic and Conspiracy lines; recordings cached under `localrecordings/`
 - **Event alert sounds** (web): per-label MP3 chimes with browser queue, or Chatterbox TTS when enabled
 - Keyboard-first navigation (TUI), clean error states, auto-retry
 - Works great over SSH and inside tmux (TUI); or over the local network in any browser (Web)
@@ -258,9 +258,11 @@ Frigate reports auto-refresh on an interval (`frigate_report.auto_interval`, def
 
 ### Chatterbox TTS (web only)
 
-When `chatterbox_tts.enabled` is true, the **Overview** tab shows a voice test panel: pick a **clone** or **predefined** voice from your [Chatterbox TTS Server](https://github.com/resemble-ai/chatterbox), type text, and click **Speak**. The server proxies `POST /tts` to Chatterbox (default `http://host.docker.internal:8004` from Docker).
+When `chatterbox_tts.enabled` is true, the **Overview** tab shows a voice panel: pick a **TTS model**, **clone** or **predefined** voice, and **delivery mode**, then type text and click **Speak**. The web server proxies `POST /tts` to your [Chatterbox TTS Server](https://github.com/resemble-ai/chatterbox) (default `http://host.docker.internal:8004` from Docker).
 
-Generated audio is cached in **`localrecordings/`** keyed by message text and voice, so repeat phrases replay instantly without calling Chatterbox again. Configure in `config.yaml`:
+Generated audio is cached in **`localrecordings/`** keyed by message text, voice, delivery mode, and TTS model, so repeat phrases replay instantly without calling Chatterbox again. UI choices are persisted in `localrecordings/.event_voice.json` and used for event alerts.
+
+Configure in `config.yaml`:
 
 ```yaml
 chatterbox_tts:
@@ -274,13 +276,58 @@ chatterbox_tts:
   default_test_message: "Person detected on driveway."
 ```
 
-API: `GET /api/tts/voices`, `POST /api/tts/speak` (optional `voice_mode` / `voice` for manual tests). Event alerts always use the configured clone/predefined voice, not the Overview dropdown.
+#### TTS model selector
+
+The **Model** dropdown lists three Chatterbox engines and hot-swaps the active model on the TTS server (`POST /save_settings` + `/restart_server`):
+
+| Model | ID | Notes |
+|-------|-----|-------|
+| **Turbo** | `chatterbox-turbo` | Fast English; required for paralinguistic tags |
+| **Original** | `chatterbox` | High-quality English with exaggeration / CFG tuning |
+| **Multilingual** | `chatterbox-multilingual` | 23 languages with zero-shot cloning |
+
+Switching models clears incompatible cached recordings and regenerates them on the next speak or alert.
+
+#### Delivery modes
+
+The **Mode** dropdown rewrites alert text before TTS. All modes append to the base detection (`{label} on {camera}`):
+
+| Mode | Behavior |
+|------|----------|
+| **Normal** | Speaks the base alert only |
+| **Conspiracy** | Appends a random Alex Jones–style follow-up (125 phrases) |
+| **Panicky** | Wraps the alert in an urgent all-caps-style preamble |
+| **Neurotic** | Appends a random Kryten-style anxious follow-up (100 phrases) |
+| **Playful** | Appends a random lighthearted quip |
+
+#### Paralinguistic tags (Turbo only)
+
+When **Turbo** is selected, **Neurotic** and **Conspiracy** modes may inject Chatterbox paralinguistic tags into the follow-up phrase (~38–40% of eligible lines). Tags are chosen by phrase content and placed naturally (prefix, suffix, or mid-sentence):
+
+`[laugh]` `[chuckle]` `[gasp]` `[cough]` `[sigh]` `[groan]` `[sniff]` `[shush]` `[clear throat]`
+
+Question-style conspiracy lines (e.g. `False flag?`) are left untagged. Tag injection uses a stable seed per `(delivery, base_text, phrase)` so cached recordings stay consistent across replays.
+
+**Original** and **Multilingual** models ignore tags — switch to Turbo to hear them.
+
+#### API
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/tts/voices` | List clone and predefined voices; returns current model and delivery mode |
+| `GET /api/tts/voice` | Read saved voice and delivery mode for event alerts |
+| `POST /api/tts/voice` | Persist voice and/or delivery mode |
+| `GET /api/tts/models` | List models and report the active Chatterbox engine |
+| `POST /api/tts/model` | Hot-swap the Chatterbox engine model |
+| `POST /api/tts/speak` | Synthesize speech (optional `voice_mode` / `voice` / `delivery_mode` for manual tests) |
+
+Event alerts use the voice, model, and delivery mode chosen in the Overview panel (not one-off Speak overrides).
 
 ### Event alerts — sounds and TTS (web only)
 
 When new detections arrive with **Alerts: On**, the dashboard queues playback (one at a time). Click **Alerts: Off** once to allow browser audio, then toggle **On** / **Muted**.
 
-**Chatterbox TTS** (when `chatterbox_tts.event_alerts` is true): speaks the `event_template` for each new event. Cached recordings are reused when the same phrase was generated before.
+**Chatterbox TTS** (when `chatterbox_tts.event_alerts` is true): speaks the `event_template` for each new event, rewritten by the selected delivery mode (and Turbo tags when applicable). Cached recordings are reused when the same phrase, voice, mode, and model were generated before.
 
 **MP3 chimes** (fallback or when TTS is off): place audio in **`sounds/`** (mounted at `/app/sounds`) and map kinds in config:
 
