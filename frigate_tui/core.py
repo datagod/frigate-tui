@@ -13,6 +13,7 @@ The goal is "exact same features" with zero duplication of the complex update lo
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -50,7 +51,12 @@ from frigate_tui.local_time import (
 from frigate_tui.api import FrigateClient
 from frigate_tui.genai_activity import group_by_hour, list_chronological, make_activity_record
 from frigate_tui.genai_health import collect_genai_health, frigate_review_genai_probe
-from frigate_tui.genai_report import generate_activity_report, resolve_llm_settings
+from frigate_tui.genai_report import (
+    generate_activity_report,
+    preload_ollama_model,
+    report_ollama_options,
+    resolve_llm_settings,
+)
 from frigate_tui.report_storage import save_frigate_genai_report
 from frigate_tui.models import (
     CameraStats,
@@ -266,6 +272,19 @@ class FrigateMonitorCore:
     @property
     def frigate_version(self) -> str:
         return self._frigate_version
+
+    def _set_frigate_version(self, version: str | None, *, log_connect: bool = False) -> None:
+        """Update displayed Frigate version and notify UI when it changes."""
+        ver = (version or "").strip() or "unknown"
+        prev = self._frigate_version
+        if ver == prev:
+            return
+        self._frigate_version = ver
+        if log_connect and ver not in ("?", "unknown"):
+            self.add_log(f"Connected to Frigate {ver}", "success")
+        elif prev not in ("?", "") and ver not in ("?", "unknown") and prev != ver:
+            self.add_log(f"Frigate version now {ver} (was {prev})", "info")
+        self._notify("version", self._frigate_version)
 
     @staticmethod
     def event_to_dict(e: FrigateEvent) -> dict[str, Any]:
@@ -512,17 +531,16 @@ class FrigateMonitorCore:
         self.add_log(f"Starting Frigate TUI v{__version__}", "info")
         self.add_log(f"Target: {self.frigate_url}", "info")
 
-        # One-time version (important diagnostic, same as TUI)
+        # Version probe (also refreshed from /api/stats so upgrades show without restart)
         try:
-            self._frigate_version = await self._client.get_version()
-            self.add_log(f"Connected to Frigate {self._frigate_version}", "success")
+            ver = await self._client.get_version()
+            self._set_frigate_version(ver, log_connect=True)
         except Exception as e:
-            self._frigate_version = "unknown"
+            self._set_frigate_version("unknown")
             self.add_log(
                 f"Failed to reach {self.frigate_url}/api/version: {self._format_connection_error(e)}",
                 "error",
             )
-        self._notify("version", self._frigate_version)
 
         # Seed initial data (non-demo)
         if self.demo:
@@ -531,6 +549,7 @@ class FrigateMonitorCore:
             await self._load_initial_events()
             await self._load_initial_timeline()
             await self._backfill_genai_activity()
+            self._tasks.append(asyncio.create_task(self._preload_report_ollama_model()))
 
         # Always poll stats
         self._tasks.append(
@@ -957,6 +976,30 @@ class FrigateMonitorCore:
         self._sync_event_descriptions_to_genai_activity(hours=hrs)
         return list_chronological(self.genai_activity, hrs)
 
+    async def _preload_report_ollama_model(self) -> None:
+        if self.demo:
+            return
+        llm = resolve_llm_settings(self.genai_report_config)
+        if not llm:
+            return
+        model = llm["model"]
+        gpu = llm.get("main_gpu")
+        options = report_ollama_options(self.genai_report_config)
+        gpu_note = f" on GPU {gpu}" if gpu is not None else ""
+        self.add_log(f"Summary LLM: loading {model}{gpu_note}…", "info")
+        timeout = float(self.genai_report_config.get("timeout", 180))
+        err = await preload_ollama_model(
+            base_url=llm["base_url"],
+            model=model,
+            ollama_options=options,
+            keep_alive=-1,
+            timeout=min(timeout, 120.0),
+        )
+        if err:
+            self.add_log(f"Summary LLM preload failed: {err}", "warning")
+        else:
+            self.add_log(f"Summary LLM: {model} ready{gpu_note}", "info")
+
     async def generate_genai_report(self, hours: float | None = None) -> dict[str, Any]:
         """Build hourly sections and ask the configured LLM for a narrative report."""
         hrs = hours if hours is not None else self.genai_report_default_hours
@@ -1025,9 +1068,12 @@ class FrigateMonitorCore:
 
         n_msgs = sum(s["count"] for s in sections)
         timeout = float(self.genai_report_config.get("timeout", 180))
+        options = report_ollama_options(self.genai_report_config)
+        gpu = llm.get("main_gpu")
+        gpu_note = f", GPU {gpu}" if gpu is not None else ""
         self.add_log(
             f"Summary: requesting report for {n_msgs} GenAI message(s) over {hrs:g}h "
-            f"via {llm['model']} @ {llm['base_url']} (timeout {timeout:.0f}s)",
+            f"via {llm['model']} @ {llm['base_url']}{gpu_note} (timeout {timeout:.0f}s)",
             "info",
         )
         report, err = await generate_activity_report(
@@ -1036,6 +1082,7 @@ class FrigateMonitorCore:
             sections=sections,
             hours=hrs,
             timeout=timeout,
+            ollama_options=options,
         )
         if err:
             self.add_log(f"Summary failed ({llm['model']} @ {llm['base_url']}): {err}", "error")
@@ -1397,6 +1444,13 @@ class FrigateMonitorCore:
         if stats:
             self.cameras = parse_cameras(stats)
             self.health = compute_health(stats)
+
+            # Keep Frigate version current (stats.service.version survives Frigate upgrades)
+            svc = stats.get("service") if isinstance(stats, dict) else None
+            if isinstance(svc, dict):
+                live_ver = svc.get("version")
+                if live_ver:
+                    self._set_frigate_version(FrigateClient._normalize_version(live_ver))
 
             # Record history for web charts/histograms
             ts = time.time()
@@ -1778,6 +1832,47 @@ class FrigateMonitorCore:
     # MQTT real-time path (exact same complex handling as original TUI)
     # ------------------------------------------------------------------
 
+    def _mqtt_client_id(self) -> str:
+        """Unique MQTT client id so web + TUI (or reconnects) do not evict each other."""
+        return f"frigate-tui-{os.getpid():x}"
+
+    def _handle_mqtt_payload(self, payload: dict[str, Any], topic_prefix: str) -> None:
+        if self.demo:
+            return
+        try:
+            topic = payload.get("_topic", "")
+            if topic.endswith("/reviews") or topic == f"{topic_prefix}/reviews":
+                self._handle_review_mqtt_update(payload)
+                return
+            if "tracked_object_update" in topic:
+                self._handle_genai_update(payload)
+                return
+
+            fe = frigate_event_from_mqtt_payload(payload)
+            if fe is None:
+                return
+
+            event_type = payload.get("type", "new")
+            is_tracked = any(e.id == fe.id for e in self.recent_events)
+            if not is_tracked:
+                current_min_start = min(
+                    (e.start_time for e in self.recent_events), default=0
+                )
+                if event_type != "new" and fe.start_time < current_min_start:
+                    return
+
+            changed = self._merge_events([fe], llm_source="mqtt-event")
+            label = fe.display_label
+            if changed:
+                if event_type == "new" or not is_tracked:
+                    self.add_log(f"Event: {label} on {fe.camera}", "success")
+                elif event_type == "end":
+                    self.add_log(f"Event ended (MQTT): {label} on {fe.camera}", "info")
+            elif event_type == "end":
+                self.add_log(f"Event ended (MQTT): {label} on {fe.camera}", "info")
+        except Exception as e:
+            self.add_log(f"MQTT event parse/render error: {e}", "warning")
+
     async def _run_mqtt_listener(self) -> None:
         if not self.mqtt_config:
             return
@@ -1788,100 +1883,84 @@ class FrigateMonitorCore:
         username = mqtt_cfg.get("username")
         password = mqtt_cfg.get("password")
         topic_prefix = mqtt_cfg.get("topic_prefix", "frigate")
+        client_id = self._mqtt_client_id()
+        reconnect_delay = 5.0
 
-        self.add_log(f"Connecting to MQTT at {host}:{port}...", "info")
+        while self._running:
+            self.add_log(f"Connecting to MQTT at {host}:{port}...", "info")
+            client: FrigateMqttClient | None = None
+            try:
+                client = FrigateMqttClient(
+                    host=host,
+                    port=port,
+                    username=username,
+                    password=password,
+                    topic_prefix=topic_prefix,
+                    client_id=client_id,
+                )
+                self._mqtt_client = client
 
-        try:
-            self._mqtt_client = FrigateMqttClient(
-                host=host,
-                port=port,
-                username=username,
-                password=password,
-                topic_prefix=topic_prefix,
-            )
+                async with client:
+                    connected = await client.wait_until_connected(timeout=8.0)
+                    self.mqtt_connected = bool(connected)
+                    if connected:
+                        reconnect_delay = 5.0
+                        self.add_log(
+                            "MQTT connected — events, GenAI object descriptions (tracked_object_update), "
+                            "and review summaries (reviews) in real time",
+                            "success",
+                        )
+                    else:
+                        self.add_log("MQTT connection timeout — retrying", "warning")
 
-            async with self._mqtt_client:
-                connected = await self._mqtt_client.wait_until_connected(timeout=8.0)
-                self.mqtt_connected = bool(connected)
-                if connected:
+                    async for payload in client.messages():
+                        self._handle_mqtt_payload(payload, topic_prefix)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.mqtt_connected = False
+                err = str(e)
+                is_dns_error = (
+                    "Name or service not known" in err
+                    or "getaddrinfo" in err.lower()
+                    or getattr(e, "errno", None) in (-2, -3)
+                )
+
+                if is_dns_error:
                     self.add_log(
-                        "MQTT connected — events, GenAI object descriptions (tracked_object_update), "
-                        "and review summaries (reviews) in real time",
-                        "success",
+                        f"MQTT host '{host}' could not be resolved (DNS error). "
+                        "This is common if 'mqtt' is only valid inside the Frigate Docker network. "
+                        "Events still refresh via HTTP polling.",
+                        "warning",
                     )
                 else:
-                    self.add_log("MQTT connection timeout — falling back to polling?", "warning")
+                    self.add_log(f"MQTT listener error: {err}", "error")
 
-                async for payload in self._mqtt_client.messages():
-                    if self.demo:
-                        continue
-                    try:
-                        topic = payload.get("_topic", "")
-                        if topic.endswith("/reviews") or topic == f"{topic_prefix}/reviews":
-                            self._handle_review_mqtt_update(payload)
-                            continue
-                        if "tracked_object_update" in topic:
-                            self._handle_genai_update(payload)
-                            continue
+                if not getattr(self, "_event_polling_active", False):
+                    ev_int = max(2.0, self.poll_interval * 2)
+                    self._tasks.append(
+                        asyncio.create_task(
+                            self._interval_loop("events", ev_int, self._refresh_events)
+                        )
+                    )
+                    self._event_polling_active = True
+                    if not is_dns_error:
+                        self.add_log("MQTT failed — falling back to event polling", "warning")
+            finally:
+                self.mqtt_connected = False
+                self._mqtt_client = None
+                asyncio.create_task(self.refresh_genai_health(force=True))
 
-                        fe = frigate_event_from_mqtt_payload(payload)
-                        if fe is None:
-                            continue
+            if not self._running:
+                break
 
-                        event_type = payload.get("type", "new")
-                        is_tracked = any(e.id == fe.id for e in self.recent_events)
-                        if not is_tracked:
-                            current_min_start = min(
-                                (e.start_time for e in self.recent_events), default=0
-                            )
-                            if event_type != "new" and fe.start_time < current_min_start:
-                                continue
-
-                        changed = self._merge_events([fe], llm_source="mqtt-event")
-                        label = fe.display_label
-                        if changed:
-                            if event_type == "new" or not is_tracked:
-                                self.add_log(f"Event: {label} on {fe.camera}", "success")
-                            elif event_type == "end":
-                                self.add_log(f"Event ended (MQTT): {label} on {fe.camera}", "info")
-                        elif event_type == "end":
-                            self.add_log(f"Event ended (MQTT): {label} on {fe.camera}", "info")
-                    except Exception as e:
-                        self.add_log(f"MQTT event parse/render error: {e}", "warning")
-                        continue
-
-        except Exception as e:
-            self.mqtt_connected = False
-            err = str(e)
-            is_dns_error = (
-                "Name or service not known" in err
-                or "getaddrinfo" in err.lower()
-                or getattr(e, "errno", None) in (-2, -3)
-            )
-
-            if is_dns_error:
-                host = (self.mqtt_config or {}).get("host", "mqtt")
-                self.add_log(
-                    f"MQTT host '{host}' could not be resolved (DNS error). "
-                    "This is common if 'mqtt' is only valid inside the Frigate Docker network. "
-                    "Falling back to HTTP polling for events.",
-                    "warning",
-                )
-            else:
-                self.add_log(f"MQTT listener error: {err}", "error")
-
-            if not getattr(self, "_event_polling_active", False):
-                ev_int = max(2.0, self.poll_interval * 2)
-                self._tasks.append(
-                    asyncio.create_task(self._interval_loop("events", ev_int, self._refresh_events))
-                )
-                self._event_polling_active = True
-                if not is_dns_error:
-                    # For other errors, keep the original short fallback notice
-                    self.add_log("MQTT failed — falling back to event polling", "warning")
-        finally:
-            self.mqtt_connected = False
-            asyncio.create_task(self.refresh_genai_health(force=True))
+            self.add_log(f"MQTT reconnecting in {reconnect_delay:.0f}s…", "warning")
+            try:
+                await asyncio.sleep(reconnect_delay)
+            except asyncio.CancelledError:
+                break
+            reconnect_delay = min(60.0, reconnect_delay * 1.5)
 
     def _handle_review_mqtt_update(self, payload: dict) -> None:
         """Handle frigate/reviews MQTT when GenAI metadata is attached to a review."""

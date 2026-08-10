@@ -56,10 +56,26 @@ class FrigateClient:
         return resp.text.strip()
 
     async def get_version(self) -> str:
+        """Return Frigate's running version string (e.g. ``0.18.0-344efb6``)."""
         try:
-            return await self._get("/api/version")
+            raw = await self._get("/api/version")
         except Exception:
             return "unknown"
+        return self._normalize_version(raw)
+
+    @staticmethod
+    def _normalize_version(raw: Any) -> str:
+        """Coerce /api/version (text or JSON) into a single clean version string."""
+        if raw is None:
+            return "unknown"
+        if isinstance(raw, dict):
+            for key in ("version", "frigate_version", "release"):
+                val = raw.get(key)
+                if val is not None and str(val).strip():
+                    return str(val).strip()
+            return "unknown"
+        text = str(raw).strip().strip('"').strip("'")
+        return text or "unknown"
 
     async def get_stats(self) -> dict[str, Any]:
         return await self._get("/api/stats")

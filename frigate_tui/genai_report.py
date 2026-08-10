@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from frigate_tui.genai_activity import format_messages_for_prompt
+from frigate_tui.ollama_options import build_ollama_gpu_options, main_gpu_from_config
 
 
 def resolve_llm_settings(
@@ -26,7 +27,52 @@ def resolve_llm_settings(
     model = (cfg.get("model") or "").strip()
     if not base or not model:
         return None
-    return {"base_url": base, "model": model}
+    gpu = main_gpu_from_config(cfg, base_url=base)
+    out: dict[str, Any] = {"base_url": base, "model": model}
+    if gpu is not None:
+        out["main_gpu"] = gpu
+    return out
+
+
+def report_ollama_options(genai_report_cfg: dict[str, Any] | None) -> dict[str, Any]:
+    cfg = genai_report_cfg or {}
+    base = str(cfg.get("base_url") or "").strip().rstrip("/")
+    return build_ollama_gpu_options(
+        main_gpu=main_gpu_from_config(cfg, base_url=base)
+    )
+
+
+async def preload_ollama_model(
+    *,
+    base_url: str,
+    model: str,
+    ollama_options: dict[str, Any] | None = None,
+    keep_alive: str | int = -1,
+    timeout: float = 120.0,
+) -> str | None:
+    """Load a model into Ollama VRAM. Returns an error string or None on success."""
+    url = f"{base_url.rstrip('/')}/api/generate"
+    payload: dict[str, Any] = {
+        "model": model,
+        "prompt": "",
+        "stream": False,
+        "keep_alive": keep_alive,
+        "options": ollama_options or build_ollama_gpu_options(),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.TimeoutException:
+        return f"Ollama timed out after {timeout:.0f}s"
+    except httpx.HTTPStatusError as e:
+        return f"Ollama HTTP {e.response.status_code}: {e.response.text[:300]}"
+    except httpx.RequestError as e:
+        return f"Ollama request error: {e}"
+    if isinstance(data, dict) and data.get("error"):
+        return str(data["error"])
+    return None
 
 
 def build_summary_prompt(hours: float, context: str) -> str:
@@ -128,6 +174,7 @@ async def generate_activity_report(
     sections: list[dict[str, Any]],
     hours: float,
     timeout: float = 180.0,
+    ollama_options: dict[str, Any] | None = None,
 ) -> tuple[str | None, str | None]:
     """Call Ollama /api/chat. Returns (markdown_report, error_message)."""
     if not sections:
@@ -143,6 +190,7 @@ async def generate_activity_report(
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
+        "options": ollama_options or build_ollama_gpu_options(),
     }
 
     def _response_detail(resp: httpx.Response) -> str:

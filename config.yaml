@@ -22,8 +22,9 @@ mqtt:
 # GenAI Activity Report tab — sends collected GenAI messages to an LLM for hourly summaries
 genai_report:
   default_hours: 1.0
-  base_url: http://ollama:11434
+  base_url: http://ollama-gpu0:11434
   model: qwen2.5:3b
+  main_gpu: 0                # host GPU 0; omitted on API calls to ollama-gpu0 container
   timeout: 180
 
 frigate_report:

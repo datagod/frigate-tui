@@ -80,6 +80,26 @@
     .genai-msg { padding: 0.25rem 0; border-bottom: 1px solid #272e3b; line-height: 1.35; }
     .genai-msg:last-child { border-bottom: none; }
 
+    .settings-section {
+      margin-bottom: 1rem;
+      padding: 0.75rem;
+      background: #161b26;
+      border: 1px solid #4a5263;
+      border-radius: 0.375rem;
+      font-size: 0.875rem;
+    }
+    .settings-section__title {
+      font-weight: 600;
+      color: #c0c5d1;
+      margin-bottom: 0.35rem;
+    }
+    .settings-section__hint {
+      font-size: 10px;
+      color: #6b7280;
+      margin-bottom: 0.5rem;
+      line-height: 1.35;
+    }
+
     /* Summary tab — resizable report panels */
     .summary-report-box {
       display: flex;
@@ -146,13 +166,13 @@
     </div>
     <div class="flex items-center gap-2">
       <button onclick="doRefresh()" class="px-3 py-1 rounded bg-[#272e3b] hover:bg-[#3a4255] active:bg-[#4a5263] text-xs">Refresh</button>
-      <button onclick="clearLog()" class="px-3 py-1 rounded bg-[#272e3b] hover:bg-[#3a4255] text-xs">Clear Log</button>
-      <button onclick="showHelp()" class="px-3 py-1 rounded bg-[#272e3b] hover:bg-[#3a4255] text-xs">Help</button>
-      <button id="alerts-toggle" type="button" onclick="toggleEventAlerts()"
+      <button id="alerts-toggle-header" type="button" onclick="toggleEventAlerts()"
         class="px-3 py-1 rounded bg-[#272e3b] hover:bg-[#3a4255] text-xs border border-transparent"
-        title="Play a chime when new events arrive (click once to enable browser audio)">
+        title="Chimes or TTS when new detections arrive (click once to enable browser audio)">
         Alerts: Off
       </button>
+      <button onclick="clearLog()" class="px-3 py-1 rounded bg-[#272e3b] hover:bg-[#3a4255] text-xs">Clear Log</button>
+      <button onclick="showHelp()" class="px-3 py-1 rounded bg-[#272e3b] hover:bg-[#3a4255] text-xs">Help</button>
       <div class="text-[#6b7280] text-xs ml-2" id="target-url">{{ snapshot.frigate_url }}</div>
     </div>
   </div>
@@ -163,11 +183,6 @@
     <div class="flex items-center gap-1"><span class="text-[#6b7280] font-semibold">DETECTION</span> <span id="sum-detection" class="metric-value">{{ (snapshot.summary.detection_fps or 0)|round(1) }}</span><canvas id="spark-detection" width="55" height="16" class="ml-1"></canvas></div>
     <div><span class="text-[#6b7280] font-semibold">GPU</span> <span id="sum-gpu" class="metric-value">{{ snapshot.summary.gpu or '—' }}</span></div>
     <div class="flex items-center gap-1"><span class="text-[#6b7280] font-semibold">SKIPPED</span> <span id="sum-skipped" class="metric-value">{{ (snapshot.summary.skipped_fps or 0)|round(1) }}</span><canvas id="spark-skipped" width="55" height="16" class="ml-1"></canvas></div>
-    <div class="flex items-center gap-1 ml-4 text-xs">
-      <span class="text-[#6b7280] font-semibold">POLL</span>
-      <input id="poll-interval" type="number" min="1" step="1" value="5" class="w-14 bg-[#161b26] border border-[#4a5263] text-xs px-1 py-0.5 rounded" />
-      <span class="text-[#6b7280]">s</span>
-    </div>
     <div class="ml-auto text-[10px] text-[#6b7280]">Live via core • SSE • identical logic to TUI</div>
   </div>
 
@@ -178,6 +193,7 @@
       <!-- Tab bar -->
       <div class="flex gap-1 mb-2 text-sm">
         <div onclick="switchTab('overview')" id="tab-overview" class="tab active">Overview</div>
+        <div onclick="switchTab('settings')" id="tab-settings" class="tab">Settings</div>
         <div onclick="switchTab('cameras')"  id="tab-cameras"  class="tab">Cameras</div>
         <div onclick="switchTab('events')"   id="tab-events"   class="tab">Events</div>
         <div onclick="switchTab('health')"   id="tab-health"   class="tab">Health / Queues</div>
@@ -213,14 +229,108 @@
             </div>
           </div>
 
-          <div id="chatterbox-tts-panel" class="hidden mb-4 p-3 bg-[#161b26] border border-[#4a5263] rounded text-sm">
-            <div class="font-semibold text-[#c0c5d1] mb-1">Chatterbox voice</div>
-            <p class="text-[10px] text-[#6b7280] mb-2">
-              Choose the TTS model, voice, and delivery mode for event alerts and new recordings. Test with Speak below.
+          <div class="text-[#6b7280] leading-snug">
+            This dashboard has <span class="text-white">exact feature parity</span> with the terminal UI because both
+            are driven by the same <code class="text-amber-400">FrigateMonitorCore</code>.<br><br>
+            Live updates arrive over SSE. Activity Log messages, health calculations, event ordering, and MQTT vs poll
+            behavior are identical to the TUI.<br><br>
+            <span class="text-[#c0c5d1]">Sound alerts (web only):</span> every Frigate detection
+            (MQTT events and timeline visible rows) is logged as
+            <span class="font-mono">Event: …</span> and spoken via Chatterbox
+            <span class="font-mono">{label} on {camera}</span> using the voice chosen in
+            <span class="text-white">Settings</span> (cached under <span class="font-mono">localrecordings/</span>).
+            Otherwise MP3/WAV from <span class="font-mono">sounds/</span> via <span class="font-mono">web_alerts.sounds</span>.
+            Enable browser audio in <span class="text-white">Settings → Event alerts</span>.
+          </div>
+          <div class="mt-4 text-xs text-[#6b7280]">
+            Use the tab bar to navigate. Poll interval, TTS voice, summary auto-refresh, and alert audio are in
+            <span class="text-white">Settings</span>.<br>
+            Click any event row for snapshot + clip links (when available).
+          </div>
+        </div>
+
+        <!-- Settings -->
+        <div id="pane-settings" class="hidden">
+          <div class="text-[#a5b4fc] font-semibold mb-1">Settings</div>
+          <p class="text-xs text-[#6b7280] mb-3">
+            Runtime preferences for this browser session. TTS voice and delivery mode sync to the server;
+            summary auto-refresh and alert audio state are stored in <span class="font-mono">localStorage</span>.
+          </p>
+
+          <section class="settings-section">
+            <div class="settings-section__title">Dashboard</div>
+            <p class="settings-section__hint">How often the core polls Frigate <span class="font-mono">/api/stats</span> (1s steps).</p>
+            <div class="flex flex-wrap items-center gap-2 text-xs">
+              <label class="text-[#6b7280] shrink-0" for="poll-interval">Poll interval</label>
+              <input id="poll-interval" type="number" min="1" step="1" value="5"
+                class="w-16 bg-[#12151c] border border-[#4a5263] rounded px-2 py-1 text-[#c0c5d1]" />
+              <span class="text-[#6b7280]">seconds</span>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-section__title">Event alerts</div>
+            <p class="settings-section__hint">
+              Chimes or Chatterbox TTS when new detections arrive. Click once to unlock browser audio, then toggle on.
+              TTS is only synthesized while this dashboard is open in a browser tab.
+            </p>
+            <button id="alerts-toggle" type="button" onclick="toggleEventAlerts()"
+              class="px-3 py-1 rounded bg-[#272e3b] hover:bg-[#3a4255] text-xs border border-transparent"
+              title="Play a chime when new events arrive (click once to enable browser audio)">
+              Alerts: Off
+            </button>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-section__title">Summary &amp; GenAI log</div>
+            <p class="settings-section__hint">Time window for Summary reports and the GenAI Log tab.</p>
+            <div class="flex flex-wrap items-center gap-3 text-xs mb-3">
+              <label class="text-[#6b7280] shrink-0" for="summary-hours">Summary time range</label>
+              <select id="summary-hours" onchange="syncSummaryHoursControls('summary-hours')"
+                class="bg-[#12151c] border border-[#4a5263] rounded px-2 py-1 text-[#c0c5d1]">
+                <option value="1" selected>1 hour</option>
+                <option value="3">3 hours</option>
+                <option value="6">6 hours</option>
+                <option value="12">12 hours</option>
+                <option value="24">24 hours</option>
+              </select>
+            </div>
+            <div class="flex flex-wrap items-center gap-3 text-xs mb-3">
+              <label class="text-[#6b7280] shrink-0" for="genai-log-hours">GenAI log time range</label>
+              <select id="genai-log-hours" class="bg-[#12151c] border border-[#4a5263] rounded px-2 py-1 text-[#c0c5d1]">
+                <option value="1" selected>1 hour</option>
+                <option value="3">3 hours</option>
+                <option value="6">6 hours</option>
+                <option value="12">12 hours</option>
+                <option value="24">24 hours</option>
+              </select>
+            </div>
+            <p class="settings-section__hint mb-2">Automatically refresh both Summary reports on an interval.</p>
+            <div class="flex flex-wrap items-center gap-2 text-xs">
+              <button id="summary-auto-btn" type="button" onclick="toggleSummaryAuto()"
+                class="px-3 py-1 rounded border border-[#4a5263] hover:border-[#6366f1] text-[#c0c5d1] hover:text-white font-medium"
+                title="Automatically refresh both summary reports on an interval">
+                Auto: On
+              </button>
+              <label class="text-[#6b7280]" for="summary-auto-interval">Every</label>
+              <select id="summary-auto-interval" onchange="onSummaryAutoIntervalChange('summary-auto-interval')"
+                class="bg-[#12151c] border border-[#4a5263] rounded px-2 py-1 text-[#c0c5d1]">
+                <option value="300">5 min</option>
+                <option value="600" selected>10 min</option>
+                <option value="900">15 min</option>
+                <option value="1800">30 min</option>
+                <option value="3600">1 hour</option>
+                <option value="7200">2 hours</option>
+              </select>
+            </div>
+          </section>
+
+          <div id="chatterbox-tts-panel" class="settings-section hidden">
+            <div class="settings-section__title">Chatterbox voice</div>
+            <p class="settings-section__hint">
+              TTS model, voice, and delivery mode for event alerts and new recordings. Test with Speak below.
               Turbo supports paralinguistic tags like <span class="font-mono">[laugh]</span> and <span class="font-mono">[sigh]</span>.
-              Conspiracy mode appends Alex Jones–style follow-ups to the alert text.
-              Cloned voices are listed first. Cached under
-              <span class="font-mono">localrecordings/</span> by message + voice + mode + model.
+              Cached under <span class="font-mono">localrecordings/</span> by message + voice + mode + model.
             </p>
             <div class="flex flex-wrap items-center gap-2 text-xs mb-2">
               <label class="text-[#6b7280] shrink-0" for="chatterbox-tts-model-select">Model</label>
@@ -241,7 +351,7 @@
               </button>
             </div>
             <div class="flex flex-wrap items-center gap-2 text-xs mb-2">
-              <label class="text-[#6b7280] shrink-0" for="chatterbox-tts-mode-select">Mode</label>
+              <label class="text-[#6b7280] shrink-0" for="chatterbox-tts-mode-select">Delivery mode</label>
               <select id="chatterbox-tts-mode-select"
                 class="min-w-[140px] bg-[#12151c] border border-[#4a5263] rounded px-2 py-1 text-[#c0c5d1]">
                 <option value="normal">Normal</option>
@@ -263,23 +373,10 @@
             <div id="chatterbox-tts-status" class="text-[10px] text-[#6b7280] mt-1"></div>
           </div>
 
-          <div class="text-[#6b7280] leading-snug">
-            This dashboard has <span class="text-white">exact feature parity</span> with the terminal UI because both
-            are driven by the same <code class="text-amber-400">FrigateMonitorCore</code>.<br><br>
-            Live updates arrive over SSE. Activity Log messages, health calculations, event ordering, and MQTT vs poll
-            behavior are identical to the TUI.<br><br>
-            <span class="text-[#c0c5d1]">Sound alerts (web only):</span> every Frigate detection
-            (MQTT events and timeline visible rows) is logged as
-            <span class="font-mono">Event: …</span> and spoken via Chatterbox
-            <span class="font-mono">{label} on {camera}</span> using the voice chosen above
-            (cached under <span class="font-mono">localrecordings/</span>).
-            Otherwise MP3/WAV from <span class="font-mono">sounds/</span> via <span class="font-mono">web_alerts.sounds</span>.
-            Use the <span class="text-white">Alerts</span> header button to enable browser audio.
-          </div>
-          <div class="mt-4 text-xs text-[#6b7280]">
-            Use the tab bar and header buttons to navigate and control the dashboard.<br>
-            Click any event row for snapshot + clip links (when available). Header <span class="font-mono">Alerts</span> toggles event chimes.
-          </div>
+          <p id="settings-chatterbox-disabled" class="hidden text-xs text-[#6b7280] settings-section">
+            Chatterbox TTS is disabled in <span class="font-mono">config.yaml</span>
+            (<span class="font-mono">chatterbox_tts.enabled: false</span>).
+          </p>
         </div>
 
         <!-- Cameras -->
@@ -318,7 +415,8 @@
         <div id="pane-summary" class="hidden flex flex-col min-h-0 h-full">
           <div class="flex flex-wrap items-center gap-2 mb-2 text-xs">
             <span class="text-[#6b7280]">Time range:</span>
-            <select id="summary-hours" class="bg-[#161b26] border border-[#4a5263] rounded px-2 py-1 text-[#c0c5d1]">
+            <select id="summary-tab-hours" onchange="syncSummaryHoursControls('summary-tab-hours')"
+              class="bg-[#161b26] border border-[#4a5263] rounded px-2 py-1 text-[#c0c5d1]">
               <option value="1" selected>1 hour</option>
               <option value="3">3 hours</option>
               <option value="6">6 hours</option>
@@ -334,13 +432,13 @@
               Frigate Report
             </button>
             <span class="text-[#4a5263]">|</span>
-            <button id="summary-auto-btn" type="button" onclick="toggleSummaryAuto()"
+            <button id="summary-tab-auto-btn" type="button" onclick="toggleSummaryAuto()"
               class="px-3 py-1 rounded border border-[#4a5263] hover:border-[#6366f1] text-[#c0c5d1] hover:text-white font-medium"
               title="Automatically refresh both summary reports on an interval">
               Auto: On
             </button>
-            <label class="text-[#6b7280]" for="summary-auto-interval">Every</label>
-            <select id="summary-auto-interval" onchange="onSummaryAutoIntervalChange()"
+            <label class="text-[#6b7280]" for="summary-tab-auto-interval">Every</label>
+            <select id="summary-tab-auto-interval" onchange="onSummaryAutoIntervalChange('summary-tab-auto-interval')"
               class="bg-[#161b26] border border-[#4a5263] rounded px-2 py-1 text-[#c0c5d1]">
               <option value="300">5 min</option>
               <option value="600" selected>10 min</option>
@@ -487,17 +585,10 @@
         <!-- GenAI Log: chronological messages, newest first -->
         <div id="pane-genai-log" class="hidden flex flex-col min-h-0 h-full">
           <div class="flex flex-wrap items-center gap-2 mb-2 text-xs">
-            <span class="text-[#6b7280]">GenAI messages from the last</span>
-            <select id="genai-log-hours" class="bg-[#161b26] border border-[#4a5263] rounded px-2 py-1 text-[#c0c5d1]">
-              <option value="1" selected>1 hour</option>
-              <option value="3">3 hours</option>
-              <option value="6">6 hours</option>
-              <option value="12">12 hours</option>
-              <option value="24">24 hours</option>
-            </select>
             <button onclick="loadGenaiLog()" class="px-2 py-1 rounded border border-[#4a5263] text-[#9ca3af] hover:text-white">
               Refresh
             </button>
+            <span class="text-[#6b7280]">Time range: <span class="text-[#c0c5d1] cursor-pointer hover:underline" onclick="switchTab('settings')">Settings</span></span>
             <span id="genai-log-status" class="text-[#6b7280] ml-1"></span>
           </div>
           <p class="text-[10px] text-[#6b7280] mb-2">Newest at top (current time backward).</p>
@@ -703,6 +794,13 @@
       }
       if (name === 'summary') {
         syncSummaryReportLayout();
+      }
+
+      if (name === 'settings') {
+        const cfg = window.__lastSnap && window.__lastSnap.chatterbox_tts;
+        if (cfg && cfg.enabled) {
+          loadChatterboxVoices(false);
+        }
       }
 
       if (name === 'health') {
@@ -1479,7 +1577,7 @@
 
       alertsStatusText() {
         if (!this.configEnabled) return 'disabled in config';
-        if (!this.unlocked) return 'off (click Alerts in header)';
+        if (!this.unlocked) return 'off (enable in Settings)';
         if (this.enabled) return `on (queue ${this.queue.length}/${this.maxQueue})`;
         return 'muted';
       },
@@ -1495,28 +1593,38 @@
       },
 
       updateToggle() {
-        const btn = document.getElementById('alerts-toggle');
-        if (!btn) return;
+        const ALERTS_TOGGLE_BTN_IDS = ['alerts-toggle-header', 'alerts-toggle'];
+        let on = false;
+        let offLabel = 'Alerts: Off';
+        let offTitle = 'Click to enable chimes for new events';
         if (!this.unlocked) {
-          btn.textContent = 'Alerts: Off';
-          btn.classList.remove('border-[#4f46e5]', 'text-[#a5b4fc]');
-          btn.title = 'Click to enable chimes for new events';
+          offLabel = 'Alerts: Off';
+          offTitle = 'Click to enable chimes for new events';
         } else if (this.enabled) {
-          btn.textContent = 'Alerts: On';
-          btn.classList.add('border-[#4f46e5]', 'text-[#a5b4fc]');
-          btn.title = 'Chime on new events (click to mute)';
+          on = true;
         } else {
-          btn.textContent = 'Alerts: Muted';
-          btn.classList.remove('border-[#4f46e5]', 'text-[#a5b4fc]');
-          btn.title = 'Click to turn chimes back on';
+          offLabel = 'Alerts: Muted';
+          offTitle = 'Click to turn chimes back on';
         }
+        ALERTS_TOGGLE_BTN_IDS.forEach((id) => {
+          const btn = document.getElementById(id);
+          if (!btn) return;
+          if (on) {
+            btn.textContent = 'Alerts: On';
+            btn.classList.add('border-[#4f46e5]', 'text-[#a5b4fc]');
+            btn.title = 'Chime on new events (click to mute)';
+          } else {
+            btn.textContent = offLabel;
+            btn.classList.remove('border-[#4f46e5]', 'text-[#a5b4fc]');
+            btn.title = offTitle;
+          }
+        });
         this.refreshOverviewAlerts();
       },
 
       async unlock(enableAfter) {
         try {
           if (this.ensureContext() && this.ctx.state === 'suspended') await this.ctx.resume();
-          await this.playAlert({ sound: 'event' });
         } catch (e) {
           return false;
         }
@@ -1526,6 +1634,9 @@
           localStorage.setItem('frigate-tui-alerts', '1');
         }
         this.updateToggle();
+        if (enableAfter !== false && this.enabled) {
+          announceAlertsState(true);
+        }
         return true;
       },
 
@@ -1538,6 +1649,7 @@
         if (this.enabled) localStorage.setItem('frigate-tui-alerts', '1');
         else localStorage.removeItem('frigate-tui-alerts');
         this.updateToggle();
+        announceAlertsState(this.enabled);
       },
 
       enqueueBatch(alerts) {
@@ -1634,6 +1746,24 @@
       },
     };
 
+    async function announceAlertsState(on) {
+      const phrase = on ? 'Alerts On' : 'Alerts Off';
+      const cfg = window.__lastSnap && window.__lastSnap.chatterbox_tts;
+      if (cfg && cfg.enabled) {
+        try {
+          await playTtsAudio(phrase, getSelectedChatterboxVoice());
+          return;
+        } catch (e) {
+          // fall through to chime when TTS unavailable
+        }
+      }
+      if (on) {
+        try {
+          await EventAlertAudio.playChime();
+        } catch (e) {}
+      }
+    }
+
     function toggleEventAlerts() {
       EventAlertAudio.toggle();
     }
@@ -1646,6 +1776,7 @@
 
     function setupChatterboxTtsPanel(snap) {
       const panel = document.getElementById('chatterbox-tts-panel');
+      const disabledNote = document.getElementById('settings-chatterbox-disabled');
       const input = document.getElementById('chatterbox-tts-text');
       const modeSel = document.getElementById('chatterbox-tts-mode-select');
       const modelSel = document.getElementById('chatterbox-tts-model-select');
@@ -1653,8 +1784,10 @@
       if (!panel) return;
       if (!cfg || !cfg.enabled) {
         panel.classList.add('hidden');
+        if (disabledNote) disabledNote.classList.remove('hidden');
         return;
       }
+      if (disabledNote) disabledNote.classList.add('hidden');
       panel.classList.remove('hidden');
       if (input && !input.value && cfg.default_test_message) {
         input.value = cfg.default_test_message;
@@ -2175,6 +2308,8 @@
           window.__lastSnap = { ...(window.__lastSnap || {}), frigate_version: data };
           const v = document.getElementById('frigate-ver');
           if (v && data) v.textContent = data;
+          const sumFr = document.getElementById('sum-frigate');
+          if (sumFr && data) sumFr.textContent = data;
           updateOverview(window.__lastSnap);
           break;
       }
@@ -2194,9 +2329,9 @@
     }
 
     function showHelp() {
-      alert('Use the tab bar to switch views. Header buttons: Refresh, Clear Log, Help, and Alerts.\n\n' +
-            'The web UI receives the exact same log messages, camera health, event ordering, and pressure calculations as the terminal TUI because they share FrigateMonitorCore.\n\n' +
-            'You can change the poll interval live using the POLL input in the top summary bar.');
+      alert('Use the tab bar to switch views. Header: Refresh, Clear Log, Help.\n\n' +
+            'Settings tab: poll interval, event alerts, Chatterbox TTS, summary time range, and auto-refresh.\n\n' +
+            'The web UI receives the exact same log messages, camera health, event ordering, and pressure calculations as the terminal TUI because they share FrigateMonitorCore.');
     }
 
     function escapeHtml(s) {
@@ -2314,9 +2449,25 @@
       modal.classList.remove('flex');
     }
 
+    const SUMMARY_HOURS_IDS = ['summary-tab-hours', 'summary-hours'];
+
+    function syncSummaryHoursControls(sourceId) {
+      const source = document.getElementById(sourceId);
+      if (!source) return;
+      const val = source.value;
+      SUMMARY_HOURS_IDS.forEach((id) => {
+        if (id === sourceId) return;
+        const el = document.getElementById(id);
+        if (el && el.value !== val) el.value = val;
+      });
+    }
+
     function summaryHoursValue() {
-      const sel = document.getElementById('summary-hours');
-      return sel ? parseFloat(sel.value) || 6 : 6;
+      for (const id of SUMMARY_HOURS_IDS) {
+        const sel = document.getElementById(id);
+        if (sel) return parseFloat(sel.value) || 6;
+      }
+      return 6;
     }
 
     function genaiLogHoursValue() {
@@ -2580,12 +2731,19 @@
       else summaryAutoIntervalSec = configInterval > 0 ? configInterval : 600;
     }
 
+    const SUMMARY_AUTO_BTN_IDS = ['summary-tab-auto-btn', 'summary-auto-btn'];
+    const SUMMARY_AUTO_INTERVAL_IDS = ['summary-tab-auto-interval', 'summary-auto-interval'];
+
     function syncSummaryAutoIntervalSelect() {
-      const sel = document.getElementById('summary-auto-interval');
-      if (!sel) return;
-      const options = Array.from(sel.options).map((o) => parseInt(o.value, 10));
+      const ref = document.getElementById('summary-auto-interval')
+        || document.getElementById('summary-tab-auto-interval');
+      if (!ref) return;
+      const options = Array.from(ref.options).map((o) => parseInt(o.value, 10));
       if (options.includes(summaryAutoIntervalSec)) {
-        sel.value = String(summaryAutoIntervalSec);
+        SUMMARY_AUTO_INTERVAL_IDS.forEach((id) => {
+          const el = document.getElementById(id);
+          if (el) el.value = String(summaryAutoIntervalSec);
+        });
         return;
       }
       let nearest = options[0];
@@ -2598,23 +2756,30 @@
         }
       }
       summaryAutoIntervalSec = nearest;
-      sel.value = String(nearest);
+      SUMMARY_AUTO_INTERVAL_IDS.forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.value = String(nearest);
+      });
     }
 
     function updateSummaryAutoToggle() {
-      const btn = document.getElementById('summary-auto-btn');
-      if (!btn) return;
-      if (summaryAutoEnabled) {
-        btn.textContent = 'Auto: On';
-        btn.classList.add('border-[#4f46e5]', 'text-[#a5b4fc]');
-        btn.title = `Automatic summaries every ${formatDurationSeconds(summaryAutoIntervalSec)} (click to disable)`;
-      } else {
-        btn.textContent = 'Auto: Off';
-        btn.classList.remove('border-[#4f46e5]', 'text-[#a5b4fc]');
-        btn.title = 'Click to enable automatic summary refresh';
-      }
-      const sel = document.getElementById('summary-auto-interval');
-      if (sel) sel.disabled = !summaryAutoEnabled;
+      SUMMARY_AUTO_BTN_IDS.forEach((id) => {
+        const btn = document.getElementById(id);
+        if (!btn) return;
+        if (summaryAutoEnabled) {
+          btn.textContent = 'Auto: On';
+          btn.classList.add('border-[#4f46e5]', 'text-[#a5b4fc]');
+          btn.title = `Automatic summaries every ${formatDurationSeconds(summaryAutoIntervalSec)} (click to disable)`;
+        } else {
+          btn.textContent = 'Auto: Off';
+          btn.classList.remove('border-[#4f46e5]', 'text-[#a5b4fc]');
+          btn.title = 'Click to enable automatic summary refresh';
+        }
+      });
+      SUMMARY_AUTO_INTERVAL_IDS.forEach((id) => {
+        const sel = document.getElementById(id);
+        if (sel) sel.disabled = !summaryAutoEnabled;
+      });
     }
 
     function updateFrigateReportAutoHint() {
@@ -2647,10 +2812,16 @@
       if (summaryAutoEnabled) runAutoSummaries();
     }
 
-    function onSummaryAutoIntervalChange() {
-      const sel = document.getElementById('summary-auto-interval');
+    function onSummaryAutoIntervalChange(sourceId) {
+      const sel = document.getElementById(sourceId || 'summary-auto-interval')
+        || document.getElementById('summary-tab-auto-interval');
       if (!sel) return;
       summaryAutoIntervalSec = Math.max(60, parseInt(sel.value, 10) || 600);
+      SUMMARY_AUTO_INTERVAL_IDS.forEach((id) => {
+        if (id === sel.id) return;
+        const el = document.getElementById(id);
+        if (el) el.value = String(summaryAutoIntervalSec);
+      });
       localStorage.setItem(SUMMARY_AUTO_INTERVAL_KEY, String(summaryAutoIntervalSec));
       setupSummaryAutoRefresh();
     }

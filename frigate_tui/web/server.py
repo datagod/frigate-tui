@@ -72,6 +72,11 @@ class Broadcaster:
         async with self._lock:
             self._queues.discard(q)
 
+    async def has_subscribers(self) -> bool:
+        """True when at least one browser has an open SSE stream."""
+        async with self._lock:
+            return bool(self._queues)
+
     async def publish(self, message: dict[str, Any]) -> None:
         """Send to all connected queues (best effort, drop on full)."""
         async with self._lock:
@@ -137,7 +142,12 @@ async def lifespan(app: FastAPI):
                 asyncio.create_task(
                     broadcaster.publish({"type": "event_alerts", "data": alerts})
                 )
-                asyncio.create_task(warm_event_tts_recordings(core, alerts))
+
+                async def _warm_event_tts_if_viewing() -> None:
+                    if await broadcaster.has_subscribers():
+                        await warm_event_tts_recordings(core, alerts)
+
+                asyncio.create_task(_warm_event_tts_if_viewing())
             elif kind == "events":
                 # Send full authoritative list (browser does the right thing for order)
                 evs = []

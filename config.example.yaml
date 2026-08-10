@@ -39,6 +39,7 @@ genai_report:
   default_hours: 1.0               # default window for Summary tab and GenAI Log
   base_url: http://ollama:11434
   model: qwen2.5:3b
+  main_gpu: 0                # report LLM GPU index (-1 = Ollama auto-select)
   timeout: 180
   health_probe_timeout: 8          # LLM reachability check on Health tab (seconds)
 

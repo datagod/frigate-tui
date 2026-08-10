@@ -287,7 +287,10 @@ async def get_or_synthesize_speech(
 
 
 async def warm_event_tts_recordings(core: Any, items: list[dict[str, Any]]) -> None:
-    """Generate or load cached TTS for new event alert messages."""
+    """Generate or load cached TTS for new event alert messages.
+
+    Call only when a web client is connected; otherwise skip background synthesis.
+    """
     cfg = core.get_event_tts_settings()
     if not cfg.get("enabled"):
         return
