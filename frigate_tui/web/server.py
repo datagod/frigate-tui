@@ -468,6 +468,23 @@ def create_app(core: FrigateMonitorCore | None = None, settings: dict[str, Any] 
         await core.refresh_now()
         return {"ok": True}
 
+    @app.post("/api/frigate/kickstart")
+    async def api_frigate_kickstart(request: Request):
+        """Restart Frigate processes (API self-restart, optional Docker fallback).
+
+        Body JSON: ``{"mode": "auto"|"api"|"docker"}`` (default ``auto``).
+        """
+        mode = "auto"
+        try:
+            body = await request.json()
+            if isinstance(body, dict) and body.get("mode") is not None:
+                mode = str(body.get("mode") or "auto")
+        except Exception:
+            mode = "auto"
+        result = await core.kickstart_frigate(mode=mode)
+        status = 200 if result.get("ok") else 502
+        return JSONResponse(result, status_code=status)
+
     @app.post("/api/set_poll_interval")
     async def api_set_poll_interval(request: Request):
         try:

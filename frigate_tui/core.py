@@ -38,7 +38,7 @@ from frigate_tui.tts_recording_cache import (
     save_event_tts_prefs,
     save_event_voice_pref,
 )
-from frigate_tui.docker_logs import frigate_logs_settings_from_config
+from frigate_tui.docker_logs import frigate_logs_settings_from_config, restart_container
 from frigate_tui.video_history import video_history_settings_from_config
 from frigate_tui.local_time import (
     configured_timezone_name,
@@ -647,6 +647,115 @@ class FrigateMonitorCore:
         self.add_log("Manual refresh requested", "info")
         await self._refresh_stats()
         await self._refresh_events()
+
+    async def kickstart_frigate(self, *, mode: str = "auto") -> dict[str, Any]:
+        """Restart Frigate processes so dead workers (e.g. embeddings/GenAI) come back.
+
+        Modes:
+          - ``api``: ``POST /api/restart`` (Frigate s6 self-restart)
+          - ``docker``: Docker Engine restart of the Frigate container
+          - ``auto``: try API first; on failure fall back to Docker when the socket is available
+        """
+        requested = (mode or "auto").strip().lower()
+        if requested not in ("api", "docker", "auto"):
+            return {"ok": False, "error": f"Invalid mode {mode!r} (use api, docker, or auto)"}
+        if self.demo:
+            self.add_log("Kickstart skipped in demo mode", "warning")
+            return {"ok": False, "error": "Kickstart is not available in demo mode", "mode": requested}
+
+        logs_cfg = self.frigate_logs_config or {}
+        container = str(logs_cfg.get("container") or "frigate").strip() or "frigate"
+        docker_socket = str(logs_cfg.get("docker_socket") or "/var/run/docker.sock")
+
+        async def _via_api() -> dict[str, Any]:
+            if not self._client:
+                return {"ok": False, "error": "Frigate HTTP client not ready", "mode": "api"}
+            self.add_log("Kickstart: asking Frigate to restart via /api/restart…", "warning")
+            data = await self._client.restart()
+            msg = str((data or {}).get("message") or "Restarting…")
+            self.add_log(f"Kickstart (API): {msg}", "success")
+            # Version/process identity will refresh on next successful stats poll
+            asyncio.create_task(self._await_frigate_after_kickstart())
+            return {"ok": True, "mode": "api", "message": msg, "frigate": data or {}}
+
+        async def _via_docker() -> dict[str, Any]:
+            self.add_log(
+                f"Kickstart: Docker restart of container '{container}'…",
+                "warning",
+            )
+            result = await restart_container(
+                container,
+                docker_socket=docker_socket,
+                timeout_s=30,
+            )
+            if result.get("ok"):
+                self.add_log(str(result.get("message") or "Docker restart issued"), "success")
+                asyncio.create_task(self._await_frigate_after_kickstart())
+            else:
+                self.add_log(
+                    f"Kickstart (Docker) failed: {result.get('error') or 'unknown error'}",
+                    "error",
+                )
+            return result
+
+        if requested == "api":
+            try:
+                return await _via_api()
+            except Exception as e:
+                err = str(e)
+                self.add_log(f"Kickstart (API) failed: {err}", "error")
+                return {"ok": False, "mode": "api", "error": err}
+
+        if requested == "docker":
+            return await _via_docker()
+
+        # auto
+        api_error: str | None = None
+        try:
+            return await _via_api()
+        except Exception as e:
+            api_error = str(e)
+            self.add_log(f"Kickstart (API) failed: {api_error} — trying Docker…", "warning")
+
+        docker_result = await _via_docker()
+        if docker_result.get("ok"):
+            docker_result["api_error"] = api_error
+            docker_result["fallback"] = True
+            return docker_result
+        return {
+            "ok": False,
+            "mode": "auto",
+            "error": (
+                f"API restart failed ({api_error}); "
+                f"Docker restart failed ({docker_result.get('error') or 'unknown'})"
+            ),
+            "api_error": api_error,
+            "docker_error": docker_result.get("error"),
+        }
+
+    async def _await_frigate_after_kickstart(self, *, timeout: float = 90.0) -> None:
+        """Poll until Frigate answers again after a kickstart, then refresh state."""
+        deadline = time.time() + max(15.0, timeout)
+        self.add_log("Kickstart: waiting for Frigate to come back…", "info")
+        while self._running and time.time() < deadline:
+            await asyncio.sleep(3.0)
+            if not self._client:
+                continue
+            try:
+                ver = await self._client.get_version()
+                if ver and ver not in ("?", "unknown"):
+                    self._set_frigate_version(ver)
+                    self.add_log(f"Kickstart: Frigate is back ({ver})", "success")
+                    await self._refresh_stats()
+                    await self.refresh_genai_health(force=True)
+                    return
+            except Exception:
+                continue
+        if self._running:
+            self.add_log(
+                "Kickstart: Frigate did not respond within the wait window — check container logs",
+                "warning",
+            )
 
     def set_poll_interval(self, interval: float) -> None:
         """Change the main polling speed at runtime (affects stats + events polling rate).

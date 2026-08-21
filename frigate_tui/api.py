@@ -80,6 +80,34 @@ class FrigateClient:
     async def get_stats(self) -> dict[str, Any]:
         return await self._get("/api/stats")
 
+    async def restart(self) -> dict[str, Any]:
+        """Ask Frigate to restart itself via ``POST /api/restart``.
+
+        Frigate's s6 supervisor exits PID 1; Docker then recreates the process
+        (typically within about a minute). Requires admin when Frigate auth is on.
+        """
+        try:
+            data = await self._post_json("/api/restart", json_body={}, timeout=15.0)
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                body = e.response.json()
+                if isinstance(body, dict):
+                    detail = str(body.get("message") or body.get("error") or "")
+            except Exception:
+                detail = (e.response.text or "")[:300]
+            raise RuntimeError(
+                f"Frigate restart HTTP {e.response.status_code}"
+                + (f": {detail}" if detail else "")
+            ) from e
+        except httpx.RequestError as e:
+            raise RuntimeError(f"Frigate restart request failed: {e}") from e
+        if isinstance(data, dict):
+            if data.get("success") is False:
+                raise RuntimeError(str(data.get("message") or "Frigate restart failed"))
+            return data
+        return {"success": True, "message": str(data) if data else "Restarting…"}
+
     async def get_events(self, *, limit: int = 30, after: float | None = None) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"limit": limit}
         if after is not None:

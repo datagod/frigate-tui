@@ -66,6 +66,57 @@ async def inspect_container(container: str, *, docker_socket: str) -> dict[str, 
     }
 
 
+async def restart_container(
+    container: str,
+    *,
+    docker_socket: str,
+    timeout_s: int = 30,
+) -> dict[str, Any]:
+    """Restart a container via the Docker Engine API (``POST …/restart``)."""
+    if not docker_socket_available(docker_socket):
+        return {
+            "ok": False,
+            "error": f"Docker socket not found at {docker_socket}",
+            "container": container,
+            "mode": "docker",
+        }
+    name = (container or "").strip() or "frigate"
+    try:
+        async with _docker_client(docker_socket=docker_socket, timeout=float(timeout_s) + 10.0) as client:
+            response = await client.post(
+                f"{_DOCKER_API}/containers/{name}/restart",
+                params={"t": max(1, int(timeout_s))},
+            )
+            if response.status_code == 404:
+                return {
+                    "ok": False,
+                    "error": f"Container '{name}' not found",
+                    "container": name,
+                    "mode": "docker",
+                }
+            if response.status_code == 204:
+                return {
+                    "ok": True,
+                    "message": f"Docker restart issued for '{name}'",
+                    "container": name,
+                    "mode": "docker",
+                }
+            response.raise_for_status()
+            return {
+                "ok": True,
+                "message": f"Docker restart issued for '{name}' (HTTP {response.status_code})",
+                "container": name,
+                "mode": "docker",
+            }
+    except httpx.HTTPError as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "container": name,
+            "mode": "docker",
+        }
+
+
 class _DockerLogDecoder:
     """Decode Docker's multiplexed log stream into complete text lines."""
 

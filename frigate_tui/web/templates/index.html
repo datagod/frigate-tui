@@ -599,8 +599,23 @@
 
         <!-- Health -->
         <div id="pane-health" class="hidden flex-1 flex flex-col overflow-hidden">
-          <div id="health-pressure" class="metric-value text-base mb-1 flex-shrink-0"></div>
-          <div id="health-skipped" class="text-xs text-[#6b7280] mb-2 flex-shrink-0"></div>
+          <div class="flex-shrink-0 mb-2 flex flex-wrap items-center gap-2">
+            <div id="health-pressure" class="metric-value text-base flex-1 min-w-[12rem]"></div>
+            <div class="flex items-center gap-1.5">
+              <button type="button" id="btn-kickstart" onclick="kickstartFrigate('auto')"
+                title="Restart Frigate processes via API (falls back to Docker restart)"
+                class="px-2.5 py-1 rounded border border-amber-700/70 bg-amber-950/40 text-amber-200 hover:bg-amber-900/50 text-[11px] font-semibold">
+                Kickstart
+              </button>
+              <button type="button" id="btn-kickstart-docker" onclick="kickstartFrigate('docker')"
+                title="Force Docker restart of the Frigate container"
+                class="px-2 py-1 rounded border border-[#4a5263] text-[#9ca3af] hover:text-white text-[10px]">
+                Docker force
+              </button>
+            </div>
+          </div>
+          <div id="health-skipped" class="text-xs text-[#6b7280] mb-1 flex-shrink-0"></div>
+          <div id="kickstart-status" class="text-[11px] text-[#6b7280] mb-2 flex-shrink-0 hidden"></div>
 
           <div class="flex-shrink-0 mb-2 rounded border border-[#4a5263] bg-[#161b26] px-2 py-1.5 text-xs">
             <div class="flex items-center justify-between gap-2 mb-1">
@@ -2321,6 +2336,62 @@
         await fetch('/api/refresh', { method: 'POST' });
         // Core will push updates via SSE
       } catch (e) {}
+    }
+
+    async function kickstartFrigate(mode) {
+      const m = mode || 'auto';
+      const label = m === 'docker' ? 'Docker force-restart Frigate' : 'Kickstart Frigate (API, Docker fallback)';
+      if (!window.confirm(label + '?\n\nDetection/UI will be briefly unavailable while processes restart (up to ~1 minute).')) {
+        return;
+      }
+      const status = document.getElementById('kickstart-status');
+      const btn = document.getElementById('btn-kickstart');
+      const btnDocker = document.getElementById('btn-kickstart-docker');
+      const setBusy = (busy) => {
+        if (btn) btn.disabled = busy;
+        if (btnDocker) btnDocker.disabled = busy;
+        if (btn) btn.classList.toggle('opacity-50', busy);
+        if (btnDocker) btnDocker.classList.toggle('opacity-50', busy);
+      };
+      if (status) {
+        status.classList.remove('hidden', 'bad', 'good', 'warn');
+        status.classList.add('warn');
+        status.textContent = m === 'docker'
+          ? 'Issuing Docker restart…'
+          : 'Kickstarting Frigate via API…';
+      }
+      setBusy(true);
+      try {
+        const r = await fetch('/api/frigate/kickstart', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: m }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (status) {
+          status.classList.remove('warn', 'bad', 'good');
+          if (data.ok) {
+            status.classList.add('good');
+            const via = data.mode || m;
+            const extra = data.fallback ? ' (API failed; used Docker)' : '';
+            status.textContent = (data.message || 'Restart issued') + ` via ${via}${extra}. Waiting for Frigate…`;
+            // Refresh health after Frigate has a chance to come back
+            setTimeout(() => { try { refreshGenaiHealth(true); } catch (e) {} }, 20000);
+            setTimeout(() => { try { doRefresh(); } catch (e) {} }, 25000);
+          } else {
+            status.classList.add('bad');
+            status.textContent = data.error || ('Kickstart failed (HTTP ' + r.status + ')');
+          }
+        }
+      } catch (e) {
+        if (status) {
+          status.classList.remove('hidden', 'warn', 'good');
+          status.classList.add('bad');
+          status.textContent = 'Kickstart request failed: ' + (e && e.message ? e.message : e);
+        }
+      } finally {
+        setBusy(false);
+      }
     }
 
     function clearLog() {

@@ -68,6 +68,7 @@ services:
     image: frigate-tui:web
     container_name: frigate-web
     profiles: ["web"]
+    restart: unless-stopped
 
     environment:
       # Point this at an address the web container can reach Frigate on.
